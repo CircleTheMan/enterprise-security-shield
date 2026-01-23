@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Senza1dio\SecurityShield\Config;
 
 use Senza1dio\SecurityShield\Contracts\StorageInterface;
@@ -70,11 +72,23 @@ class SecurityConfig
     /** @var int Rate limit requests per minute (default: 100) */
     private int $rateLimitPerMinute = 100;
 
-    /** @var bool Enable SQL injection detection */
-    private bool $sqlInjectionDetection = true;
+    /** @var int Rate limit window in seconds (default: 60) */
+    private int $rateLimitWindow = 60;
 
-    /** @var bool Enable XSS payload detection */
-    private bool $xssDetection = true;
+    /** @var array<int, string> Trusted proxy IPs/CIDRs (for X-Forwarded-For header trust) */
+    private array $trustedProxies = [];
+
+    /** @var array<int, string> Blocked country codes (ISO 3166-1 alpha-2) */
+    private array $blockedCountries = [];
+
+    /** @var bool Enable GeoIP detection */
+    private bool $geoipEnabled = false;
+
+    /** @var int GeoIP cache TTL in seconds (default: 24h) */
+    private int $geoipCacheTTL = 86400;
+
+    /** @var int GeoIP ban duration in seconds (default: 30 days) */
+    private int $geoipBanDuration = 2592000;
 
     /**
      * Set threat score threshold for auto-ban
@@ -257,6 +271,30 @@ class SecurityConfig
     }
 
     /**
+     * Set IP whitelist (replaces existing list)
+     *
+     * @param array<int, string> $ips Array of IPs/CIDRs
+     * @return self
+     */
+    public function setIPWhitelist(array $ips): self
+    {
+        $this->ipWhitelist = [];
+        return $this->addIPWhitelist($ips); // Reuse validation logic
+    }
+
+    /**
+     * Set IP blacklist (replaces existing list)
+     *
+     * @param array<int, string> $ips Array of IPs/CIDRs
+     * @return self
+     */
+    public function setIPBlacklist(array $ips): self
+    {
+        $this->ipBlacklist = [];
+        return $this->addIPBlacklist($ips); // Reuse validation logic
+    }
+
+    /**
      * Enable or disable intelligence gathering
      *
      * @param bool $enabled
@@ -327,40 +365,79 @@ class SecurityConfig
     }
 
     /**
-     * Enable or disable SQL injection detection
+     * Set rate limit window (time window in seconds)
      *
-     * When enabled, scans all GET/POST parameters for SQL injection patterns.
-     * Detected attempts add 40 points to threat score.
+     * Defines the time window for rate limiting.
+     * Default: 60 seconds (1 minute)
      *
-     * PERFORMANCE IMPACT: ~1-5ms per request with parameters
-     * RECOMMENDATION: Always enabled in production
+     * EXAMPLES:
+     * - 60 seconds = per-minute rate limiting
+     * - 300 seconds = per-5-minutes rate limiting
+     * - 3600 seconds = per-hour rate limiting
      *
-     * @param bool $enabled
+     * @param int $seconds Window size in seconds (10-3600)
      * @return self
      */
-    public function enableSQLInjectionDetection(bool $enabled): self
+    public function setRateLimitWindow(int $seconds): self
     {
-        $this->sqlInjectionDetection = $enabled;
+        if ($seconds < 10 || $seconds > 3600) {
+            throw new \InvalidArgumentException('Rate limit window must be between 10 seconds and 1 hour');
+        }
+        $this->rateLimitWindow = $seconds;
         return $this;
     }
 
     /**
-     * Enable or disable XSS payload detection
+     * Set trusted proxy IPs/CIDRs
      *
-     * When enabled, scans all GET/POST parameters for XSS attack patterns.
-     * Detected attempts add 30 points to threat score.
+     * 
+     * When running behind Cloudflare, Nginx, AWS ELB, the REMOTE_ADDR is the proxy IP.
+     * Configure trusted proxies to extract real client IP from X-Forwarded-For headers.
      *
-     * PERFORMANCE IMPACT: ~1-5ms per request with parameters
-     * RECOMMENDATION: Always enabled in production
+     * SECURITY: Only proxy headers from these IPs are trusted (prevents IP spoofing).
      *
-     * @param bool $enabled
+     * SUPPORTED FORMATS:
+     * - Single IP: '192.168.1.1'
+     * - CIDR notation: '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'
+     *
+     * COMMON EXAMPLES:
+     * - Cloudflare: See https://www.cloudflare.com/ips/ (use CIDR ranges)
+     * - AWS ELB: Use VPC CIDR range
+     * - Local Nginx: ['127.0.0.1', '::1']
+     * - Docker network: ['172.17.0.0/16']
+     *
+     * @param array<int, string> $proxies List of trusted proxy IPs/CIDRs
      * @return self
      */
-    public function enableXSSDetection(bool $enabled): self
+    public function setTrustedProxies(array $proxies): self
     {
-        $this->xssDetection = $enabled;
+        // Validate each proxy IP/CIDR
+        foreach ($proxies as $proxy) {
+            if (!is_string($proxy)) {
+                throw new \InvalidArgumentException('Trusted proxies must be strings (IP or CIDR)');
+            }
+
+            // Check if CIDR notation
+            if (strpos($proxy, '/') !== false) {
+                [$ip, $mask] = explode('/', $proxy);
+                if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+                    throw new \InvalidArgumentException("Invalid CIDR notation: {$proxy}");
+                }
+                if (!is_numeric($mask) || (int)$mask < 0 || (int)$mask > 32) {
+                    throw new \InvalidArgumentException("Invalid CIDR mask: {$proxy}");
+                }
+            } else {
+                // Single IP
+                if (filter_var($proxy, FILTER_VALIDATE_IP) === false) {
+                    throw new \InvalidArgumentException("Invalid IP address: {$proxy}");
+                }
+            }
+        }
+
+        $this->trustedProxies = $proxies;
         return $this;
     }
+
 
     /**
      * Create config from array (Laravel/Symfony style)
@@ -418,11 +495,40 @@ class SecurityConfig
         if (isset($config['rate_limit_per_minute']) && is_int($config['rate_limit_per_minute'])) {
             $instance->setRateLimitPerMinute($config['rate_limit_per_minute']);
         }
+        if (isset($config['rate_limit_window']) && is_int($config['rate_limit_window'])) {
+            $instance->setRateLimitWindow($config['rate_limit_window']);
+        }
         if (isset($config['sql_injection_detection']) && is_bool($config['sql_injection_detection'])) {
             $instance->enableSQLInjectionDetection($config['sql_injection_detection']);
         }
         if (isset($config['xss_detection']) && is_bool($config['xss_detection'])) {
             $instance->enableXSSDetection($config['xss_detection']);
+        }
+        if (isset($config['trusted_proxies']) && is_array($config['trusted_proxies'])) {
+            $instance->setTrustedProxies($config['trusted_proxies']);
+        }
+        if (isset($config['blocked_countries']) && is_array($config['blocked_countries'])) {
+            $instance->setBlockedCountries($config['blocked_countries']);
+        }
+        if (isset($config['geoip_enabled']) && is_bool($config['geoip_enabled'])) {
+            $instance->enableGeoIP($config['geoip_enabled']);
+        }
+        if (isset($config['geoip_cache_ttl']) && is_int($config['geoip_cache_ttl'])) {
+            $instance->setGeoIPCacheTTL($config['geoip_cache_ttl']);
+        }
+        if (isset($config['geoip_ban_duration']) && is_int($config['geoip_ban_duration'])) {
+            $instance->setGeoIPBanDuration($config['geoip_ban_duration']);
+        }
+        if (isset($config['custom_patterns']) && is_array($config['custom_patterns'])) {
+            foreach ($config['custom_patterns'] as $pattern) {
+                if (is_array($pattern) && isset($pattern['pattern'], $pattern['score'])) {
+                    $instance->addThreatPattern(
+                        $pattern['pattern'],
+                        $pattern['score'],
+                        $pattern['description'] ?? ''
+                    );
+                }
+            }
         }
 
         return $instance;
@@ -450,6 +556,71 @@ class SecurityConfig
     public function getAlertWebhook(): ?string { return $this->alertWebhook; }
     public function getEnvironment(): string { return $this->environment; }
     public function getRateLimitPerMinute(): int { return $this->rateLimitPerMinute; }
-    public function isSQLInjectionDetectionEnabled(): bool { return $this->sqlInjectionDetection; }
-    public function isXSSDetectionEnabled(): bool { return $this->xssDetection; }
+    public function getRateLimitWindow(): int { return $this->rateLimitWindow; }
+    /** @return array<int, string> */
+    public function getTrustedProxies(): array { return $this->trustedProxies; }
+    /** @return array<int, string> */
+    public function getBlockedCountries(): array { return $this->blockedCountries; }
+    public function isGeoIPEnabled(): bool { return $this->geoipEnabled; }
+    public function getGeoIPCacheTTL(): int { return $this->geoipCacheTTL; }
+    public function getGeoIPBanDuration(): int { return $this->geoipBanDuration; }
+
+    /**
+     * Set blocked countries (ISO 3166-1 alpha-2 codes)
+     *
+     * @param array<int, string> $countries Country codes (e.g., ['CN', 'RU', 'KP'])
+     * @return self
+     */
+    public function setBlockedCountries(array $countries): self
+    {
+        foreach ($countries as $code) {
+            if (!is_string($code) || strlen($code) !== 2) {
+                throw new \InvalidArgumentException("Invalid country code: {$code}. Must be ISO 3166-1 alpha-2 (2 letters)");
+            }
+        }
+        $this->blockedCountries = array_map('strtoupper', $countries);
+        return $this;
+    }
+
+    /**
+     * Enable GeoIP detection
+     *
+     * @param bool $enabled
+     * @return self
+     */
+    public function enableGeoIP(bool $enabled): self
+    {
+        $this->geoipEnabled = $enabled;
+        return $this;
+    }
+
+    /**
+     * Set GeoIP cache TTL
+     *
+     * @param int $seconds Cache TTL (3600-604800, 1h-7days)
+     * @return self
+     */
+    public function setGeoIPCacheTTL(int $seconds): self
+    {
+        if ($seconds < 3600 || $seconds > 604800) {
+            throw new \InvalidArgumentException('GeoIP cache TTL must be between 1 hour and 7 days');
+        }
+        $this->geoipCacheTTL = $seconds;
+        return $this;
+    }
+
+    /**
+     * Set GeoIP ban duration
+     *
+     * @param int $seconds Ban duration (3600-2592000, 1h-30days)
+     * @return self
+     */
+    public function setGeoIPBanDuration(int $seconds): self
+    {
+        if ($seconds < 3600 || $seconds > 2592000) {
+            throw new \InvalidArgumentException('GeoIP ban duration must be between 1 hour and 30 days');
+        }
+        $this->geoipBanDuration = $seconds;
+        return $this;
+    }
 }

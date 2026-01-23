@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Senza1dio\SecurityShield\Middleware;
 
 use Senza1dio\SecurityShield\Config\SecurityConfig;
@@ -74,6 +76,9 @@ class HoneypotMiddleware
 
     /** @var array<string> Honeypot trap paths */
     private array $honeypotPaths;
+
+    /** @var array<string, true> Honeypot exact paths (O(1) lookup) */
+    private array $honeypotExactPaths = [];
 
     /** @var StorageInterface|null Storage backend */
     private ?StorageInterface $storage;
@@ -186,6 +191,16 @@ class HoneypotMiddleware
         $this->honeypotPaths = empty($honeypotPaths) ? self::DEFAULT_HONEYPOT_PATHS : $honeypotPaths;
         $this->storage = $config->getStorage();
         $this->logger = $config->getLogger();
+
+        // Build O(1) hash map for exact path matches (performance optimization)
+        // Prefix/wildcard paths stay in $honeypotPaths for linear search
+        foreach ($this->honeypotPaths as $path) {
+            // Only exact paths (no wildcards, no trailing slash for directory traps)
+            if (!str_contains($path, '*') && !str_ends_with($path, '/')) {
+                $normalized = rtrim($path, '/');
+                $this->honeypotExactPaths[$normalized] = true;
+            }
+        }
     }
 
     /**
@@ -207,13 +222,13 @@ class HoneypotMiddleware
         // Normalize path (remove query string, decode URL)
         $normalizedPath = $this->normalizePath($path);
 
-        // Check exact matches and prefix matches
-        foreach ($this->honeypotPaths as $honeypotPath) {
-            // Exact match
-            if ($normalizedPath === $honeypotPath) {
-                return true;
-            }
+        // FAST PATH: O(1) hash lookup for exact matches (~90% of honeypot paths)
+        if (isset($this->honeypotExactPaths[$normalizedPath])) {
+            return true;
+        }
 
+        // SLOW PATH: Check prefix matches and wildcards (only for directory traps)
+        foreach ($this->honeypotPaths as $honeypotPath) {
             // Prefix match (for directory traps like /.git/)
             if (str_ends_with($honeypotPath, '/') && str_starts_with($normalizedPath, $honeypotPath)) {
                 return true;
@@ -346,8 +361,11 @@ class HoneypotMiddleware
         $parsedPath = parse_url($path, PHP_URL_PATH);
         $path = (is_string($parsedPath)) ? $parsedPath : $path;
 
-        // URL decode
-        $path = urldecode($path);
+        // URL decode (rawurldecode prevents + → space conversion for path security)
+        $path = rawurldecode($path);
+
+        // Collapse multiple slashes (//admin → /admin) to prevent bypass
+        $path = (string) preg_replace('#/+#', '/', $path);
 
         // Remove trailing slash (except for root /)
         if ($path !== '/' && str_ends_with($path, '/')) {
@@ -458,11 +476,12 @@ class HoneypotMiddleware
             }
         }
 
-        // Path-based identification
-        if (str_contains($path, 'wp-') || str_contains($path, 'wordpress')) {
+        // Path-based identification (case-insensitive)
+        $pathLower = strtolower($path);
+        if (str_contains($pathLower, 'wp-') || str_contains($pathLower, 'wordpress')) {
             return 'WordPress Scanner';
         }
-        if (str_contains($path, '.sql') || str_contains($path, 'backup')) {
+        if (str_contains($pathLower, '.sql') || str_contains($pathLower, 'backup')) {
             return 'Database Dumper';
         }
         if (str_contains($path, 'api/') || str_contains($path, 'graphql')) {

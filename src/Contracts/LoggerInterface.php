@@ -3,13 +3,25 @@
 namespace Senza1dio\SecurityShield\Contracts;
 
 /**
- * Logger Interface - PSR-3 Compatible
+ * Logger Interface - PSR-3-like (NOT PSR-3)
  *
- * Allows SecurityShield to integrate with any logging system:
- * - Monolog
- * - Laravel Log
- * - Symfony Logger
- * - Custom loggers
+ * IMPORTANT: This interface does NOT extend Psr\Log\LoggerInterface.
+ * It's PSR-3-*like* (same method names, signatures), but technically NOT PSR-3 compliant.
+ *
+ * WHY NOT EXTEND PSR-3:
+ * - Zero external dependencies (package is dependency-free)
+ * - Allows integration with any logging system without requiring psr/log package
+ * - Users can wrap their PSR-3 logger with this interface trivially
+ *
+ * INTEGRATION:
+ * - Monolog: Implements PSR-3 natively, can be wrapped or directly used
+ * - Laravel Log: Implements PSR-3 natively, can be wrapped or directly used
+ * - Symfony Logger: Implements PSR-3 natively, can be wrapped or directly used
+ * - Custom loggers: Implement these 6 methods
+ *
+ * MISSING FROM PSR-3:
+ * - log($level, $message, $context) method (generic log method)
+ * - alert() and notice() methods (we use emergency/critical/warning instead)
  */
 interface LoggerInterface
 {

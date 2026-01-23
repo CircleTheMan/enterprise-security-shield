@@ -34,20 +34,64 @@ interface StorageInterface
     /**
      * Increment IP threat score
      *
+     * CRITICAL: This operation MUST be atomic to prevent race conditions.
+     *
+     * ATOMICITY REQUIREMENT:
+     * Multiple concurrent requests from same IP must correctly accumulate scores:
+     * - Request A: incrementScore($ip, 10) → reads 0, writes 10
+     * - Request B: incrementScore($ip, 15) → reads 0, writes 15 (WRONG - race condition)
+     * - Expected: Final score = 25, Actual (non-atomic): 15
+     *
+     * IMPLEMENTATION GUIDANCE:
+     * - Redis: Use INCRBY + GET in Lua script (atomic) ✅
+     * - Database: Use UPDATE ... SET score = score + ? (atomic SQL) ✅
+     * - In-memory: Use locks or atomic operations ✅
+     * - WRONG: Read score, add points, write score (3 separate operations = race condition) ❌
+     *
+     * CONSEQUENCES OF NON-ATOMIC:
+     * - Attacker sends 100 concurrent requests with 40 points each
+     * - Expected: 4000 points → instant ban
+     * - Non-atomic: Only 40-400 points → ban threshold NOT reached → attack succeeds
+     *
      * @param string $ip Client IP address
      * @param int $points Points to add
      * @param int $ttl Time to live in seconds
-     * @return int New score
+     * @return int New score after increment
      */
     public function incrementScore(string $ip, int $points, int $ttl): int;
 
     /**
-     * Check if IP is banned
+     * Check if IP is banned (may query database on cold cache)
+     *
+     * Use isIpBannedCached() for hot-path ban checks (avoids DB query).
      *
      * @param string $ip Client IP address
      * @return bool True if banned
      */
     public function isBanned(string $ip): bool;
+
+    /**
+     * Fast cache-only ban check (no database fallback)
+     *
+     * PERFORMANCE-CRITICAL: This method is called at the START of handle()
+     * before ANY other operations (rate limiting, scoring, etc.).
+     *
+     * MUST be cache-only (Redis/Memory) - NO database queries allowed here.
+     * Database fallback happens in isBanned() for cold cache scenarios.
+     *
+     * PURPOSE: Immediately block banned IPs without storage writes or scoring.
+     * This prevents DoS storage amplification attacks where banned IPs continue
+     * generating expensive storage operations.
+     *
+     * IMPLEMENTATION NOTES:
+     * - Return false if cache unavailable (fail-open for availability)
+     * - Cache should be warmed by isBanned() or banIP() calls
+     * - TTL must match ban duration
+     *
+     * @param string $ip Client IP address
+     * @return bool True if banned (cache hit), false if not banned or cache miss
+     */
+    public function isIpBannedCached(string $ip): bool;
 
     /**
      * Ban an IP address

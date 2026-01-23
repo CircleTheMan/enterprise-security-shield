@@ -34,7 +34,7 @@ use Senza1dio\SecurityShield\Services\ThreatPatterns;
  * - +30 points: Known scanner User-Agents (sqlmap, nikto, etc.)
  * - +50 points: Fake/obsolete User-Agents (IE 9/10/11, ancient browsers)
  * - +100 points: Empty/NULL User-Agent (instant ban)
- * - +50 points: Geo-blocked countries (RU, CN, KP)
+ * - INSTANT BAN: Geo-blocked countries (configurable, default 30 days)
  * - +20 points: Unicode obfuscation
  * - THRESHOLD: 50 points triggers auto-ban (configurable)
  *
@@ -99,6 +99,21 @@ class WafMiddleware
     private ?BotVerifier $botVerifier = null;
 
     /**
+     * GeoIP service instance
+     */
+    private ?\Senza1dio\SecurityShield\Services\GeoIP\GeoIPService $geoip = null;
+
+    /**
+     * Metrics collector instance
+     */
+    private ?\Senza1dio\SecurityShield\Contracts\MetricsCollectorInterface $metrics = null;
+
+    /**
+     * Webhook notifier instance
+     */
+    private ?\Senza1dio\SecurityShield\Services\WebhookNotifier $webhooks = null;
+
+    /**
      * Block reason (set when request is blocked)
      */
     private ?string $blockReason = null;
@@ -145,13 +160,50 @@ class WafMiddleware
     }
 
     /**
+     * Set GeoIP service (optional but recommended)
+     *
+     * @param \Senza1dio\SecurityShield\Services\GeoIP\GeoIPService $geoip
+     * @return self
+     */
+    public function setGeoIP(\Senza1dio\SecurityShield\Services\GeoIP\GeoIPService $geoip): self
+    {
+        $this->geoip = $geoip;
+        return $this;
+    }
+
+    /**
+     * Set metrics collector (optional)
+     *
+     * @param \Senza1dio\SecurityShield\Contracts\MetricsCollectorInterface $metrics
+     * @return self
+     */
+    public function setMetrics(\Senza1dio\SecurityShield\Contracts\MetricsCollectorInterface $metrics): self
+    {
+        $this->metrics = $metrics;
+        return $this;
+    }
+
+    /**
+     * Set webhook notifier (optional)
+     *
+     * @param \Senza1dio\SecurityShield\Services\WebhookNotifier $webhooks
+     * @return self
+     */
+    public function setWebhooks(\Senza1dio\SecurityShield\Services\WebhookNotifier $webhooks): self
+    {
+        $this->webhooks = $webhooks;
+        return $this;
+    }
+
+    /**
      * Handle WAF security checks
      *
      * WORKFLOW:
+     * 0. EARLY BAN CHECK - Block banned IPs immediately (cache-only, no storage writes)
      * 1. Extract IP, path, User-Agent from request
      * 2. Check IP whitelist (instant pass)
      * 3. Check IP blacklist (instant block)
-     * 4. Check if IP is already banned
+     * 4. Check if IP is already banned (regular check with DB fallback)
      * 5. Check if legitimate bot (DNS/IP verification)
      * 6. Detect threat patterns (paths, User-Agents, geo)
      * 7. Update threat score
@@ -170,15 +222,52 @@ class WafMiddleware
         $this->threatScore = 0;
 
         // ====================================================================
-        // STEP 1: Extract request data
+        // STEP 0: EARLY BAN CHECK (before ANY other operations)
+        // ====================================================================
+        //
+        // CRITICAL OPTIMIZATION: Check ban status BEFORE extracting IP from proxy headers,
+        // parsing URLs, or ANY other operations. This prevents banned IPs from:
+        // - Incrementing rate limit counters (DoS storage amplification)
+        // - Running SQL/XSS pattern matching (CPU waste)
+        // - Triggering scoring calculations (storage writes)
+        //
+        // PERFORMANCE: Uses cache-only check (no DB query) for <1ms response.
+        // If cache miss, IP will be allowed this request but banned on next request.
+        //
+        // NOTE: This check uses REMOTE_ADDR directly (no proxy header parsing yet)
+        // to maximize performance. Proxy header parsing happens in STEP 1.
         // ====================================================================
 
-        $ipRaw = $server['REMOTE_ADDR'] ?? 'unknown';
-        $ip = is_string($ipRaw) ? $ipRaw : 'unknown';
+        $remoteAddrRaw = $server['REMOTE_ADDR'] ?? 'unknown';
+        $remoteAddr = is_string($remoteAddrRaw) ? $remoteAddrRaw : 'unknown';
+
+        // Early ban check (cache-only, ultra-fast)
+        if (filter_var($remoteAddr, FILTER_VALIDATE_IP) && $this->storage->isIpBannedCached($remoteAddr)) {
+            $this->blockReason = 'ip_banned_early';
+            // NO logging, NO metrics, NO storage writes - instant block
+            return false; // BLOCKED
+        }
+
+        // ====================================================================
+        // STEP 1: Extract request data (with proxy support)
+        // ====================================================================
+
+        // Extract real client IP (handles proxy/load balancer headers)
+        $ip = $this->extractRealClientIP($server, $this->config->getTrustedProxies());
+
+        // If IP differs from REMOTE_ADDR, check ban status again
+        if ($ip !== $remoteAddr && filter_var($ip, FILTER_VALIDATE_IP) && $this->storage->isIpBannedCached($ip)) {
+            $this->blockReason = 'ip_banned_early';
+            return false; // BLOCKED
+        }
+
         $requestUri = $server['REQUEST_URI'] ?? '/';
         $requestUriString = is_string($requestUri) ? $requestUri : '/';
+
+        // Handle malformed URLs gracefully
         $pathRaw = parse_url($requestUriString, PHP_URL_PATH);
-        $path = is_string($pathRaw) ? $pathRaw : '/';
+        $path = (is_string($pathRaw) && $pathRaw !== '') ? $pathRaw : '/';
+
         $userAgentRaw = $server['HTTP_USER_AGENT'] ?? '';
         $userAgent = is_string($userAgentRaw) ? $userAgentRaw : '';
 
@@ -188,6 +277,7 @@ class WafMiddleware
             $this->logger->warning('WAF: Invalid IP address', [
                 'ip' => $ip,
                 'path' => $path,
+                'remote_addr' => $server['REMOTE_ADDR'] ?? 'unknown',
             ]);
             return false;
         }
@@ -215,11 +305,44 @@ class WafMiddleware
                 'ip' => $ip,
                 'path' => $path,
             ]);
+            $this->recordMetric('blocked', 'blacklist');
             return false; // BLOCKED
         }
 
         // ====================================================================
-        // STEP 4: Check if IP is already banned
+        // STEP 3.5: GeoIP Country Blocking (NEW FEATURE 2026-01-23)
+        // ====================================================================
+
+        if ($this->geoip && $this->config->isGeoIPEnabled()) {
+            $blockedCountries = $this->config->getBlockedCountries();
+
+            if (!empty($blockedCountries)) {
+                $country = $this->geoip->getCountry($ip);
+
+                if ($country && in_array($country, $blockedCountries)) {
+                    $this->blockReason = "geo_blocked_{$country}";
+                    $this->logger->warning('WAF: Country blocked', [
+                        'ip' => $ip,
+                        'country' => $country,
+                        'path' => $path,
+                    ]);
+
+                    // Ban IP for configured duration (default: 30 days)
+                    $this->storage->banIP($ip, $this->config->getGeoIPBanDuration(), "Country blocked: {$country}");
+                    $this->recordMetric('blocked', 'geo_country');
+                    $this->sendWebhook('country_blocked', [
+                        'ip' => $ip,
+                        'country' => $country,
+                        'path' => $path,
+                    ]);
+
+                    return false; // BLOCKED
+                }
+            }
+        }
+
+        // ====================================================================
+        // STEP 4: Check if IP is already banned (BEFORE incrementing counters!)
         // ====================================================================
 
         if ($this->storage->isBanned($ip)) {
@@ -228,6 +351,8 @@ class WafMiddleware
                 'ip' => $ip,
                 'path' => $path,
             ]);
+            // CRITICAL: Do NOT increment request count for banned IPs
+            // (prevents DoS storage amplification attack)
             return false; // BLOCKED
         }
 
@@ -243,9 +368,20 @@ class WafMiddleware
                     'user_agent' => $userAgent,
                     'path' => $path,
                 ]);
+                // CRITICAL: Do NOT increment request count for legitimate bots
                 return true; // ALLOWED
             }
         }
+
+        // ====================================================================
+        // STEP 5.5: Rate Limiting Check (MOVED HERE - after ban/bot checks)
+        // ====================================================================
+
+        // Increment request count ONLY for non-banned, non-bot IPs
+        // (prevents DoS storage amplification attack)
+        $rateLimitWindow = $this->config->getRateLimitWindow();
+        $rateLimitMax = $this->config->getRateLimitPerMinute();
+        $requestCount = $this->storage->incrementRequestCount($ip, $rateLimitWindow);
 
         // ====================================================================
         // STEP 6: Detect threat patterns and calculate score
@@ -292,14 +428,9 @@ class WafMiddleware
         // Example: $countryCode = $this->getCountryCode($ip);
 
         // ====================================================================
-        // STEP 6.5: Rate Limiting Check (NEW)
+        // STEP 6.5: Rate Limit Scoring (requestCount already incremented above)
         // ====================================================================
 
-        // Check rate limiting (100 requests per minute default)
-        $rateLimitWindow = 60; // 60 seconds
-        $rateLimitMax = $this->config->getRateLimitPerMinute();
-
-        $requestCount = $this->storage->incrementRequestCount($ip, $rateLimitWindow);
         if ($requestCount > $rateLimitMax) {
             $score += ThreatPatterns::getRateLimitScore();
             $reasons[] = 'rate_limit_exceeded';
@@ -311,66 +442,6 @@ class WafMiddleware
                 'limit' => $rateLimitMax,
                 'window' => $rateLimitWindow,
             ]);
-        }
-
-        // ====================================================================
-        // STEP 6.6: SQL Injection Detection (NEW)
-        // ====================================================================
-
-        if ($this->config->isSQLInjectionDetectionEnabled()) {
-            // Merge GET and POST for comprehensive scanning
-            $allParams = array_merge($get, $post);
-
-            if (!empty($allParams) && ThreatPatterns::hasSQLInjection($allParams)) {
-                $score += ThreatPatterns::getSQLInjectionScore();
-                $reasons[] = 'sql_injection';
-
-                $this->logger->critical('WAF: SQL injection attempt detected', [
-                    'ip' => $ip,
-                    'path' => $path,
-                    'user_agent' => $userAgent,
-                    'params' => $allParams,
-                    'score_added' => ThreatPatterns::getSQLInjectionScore(),
-                ]);
-
-                // Log security event
-                $this->storage->logSecurityEvent('sql_injection', $ip, [
-                    'path' => $path,
-                    'params' => $allParams,
-                    'user_agent' => $userAgent,
-                    'timestamp' => time(),
-                ]);
-            }
-        }
-
-        // ====================================================================
-        // STEP 6.7: XSS Payload Detection (NEW)
-        // ====================================================================
-
-        if ($this->config->isXSSDetectionEnabled()) {
-            // Merge GET and POST for comprehensive scanning
-            $allParams = array_merge($get, $post);
-
-            if (!empty($allParams) && ThreatPatterns::hasXSSPayload($allParams)) {
-                $score += ThreatPatterns::getXSSPayloadScore();
-                $reasons[] = 'xss_payload';
-
-                $this->logger->critical('WAF: XSS payload detected', [
-                    'ip' => $ip,
-                    'path' => $path,
-                    'user_agent' => $userAgent,
-                    'params' => $allParams,
-                    'score_added' => ThreatPatterns::getXSSPayloadScore(),
-                ]);
-
-                // Log security event
-                $this->storage->logSecurityEvent('xss_attack', $ip, [
-                    'path' => $path,
-                    'params' => $allParams,
-                    'user_agent' => $userAgent,
-                    'timestamp' => time(),
-                ]);
-            }
         }
 
         // ====================================================================
@@ -463,15 +534,29 @@ class WafMiddleware
     }
 
     /**
-     * Get current threat score
+     * Get threat score added in current request
      *
-     * Returns the score added in the current request (not total accumulated score).
+     * Returns the score added ONLY in the current request, NOT the total accumulated score.
+     * For total score, query storage->getScore($ip).
      *
-     * @return int Threat score (0 = safe, 50+ = banned)
+     * RENAMED from getThreatScore() for clarity (was misleading name).
+     *
+     * @return int Threat score added this request (0 = safe, 50+ may trigger ban)
+     */
+    public function getLastRequestScore(): int
+    {
+        return $this->threatScore;
+    }
+
+    /**
+     * Get threat score added in current request (DEPRECATED - use getLastRequestScore)
+     *
+     * @deprecated Use getLastRequestScore() instead for clarity
+     * @return int Threat score added this request
      */
     public function getThreatScore(): int
     {
-        return $this->threatScore;
+        return $this->getLastRequestScore();
     }
 
     /**
@@ -533,14 +618,14 @@ class WafMiddleware
     }
 
     /**
-     * Check if IP is within CIDR range
+     * Check if IP is within CIDR range (IPv4 AND IPv6 supported)
      *
-     * EXAMPLE:
-     * - ipInCIDR('192.168.1.100', '192.168.1.0/24') → true
-     * - ipInCIDR('192.168.2.100', '192.168.1.0/24') → false
+     * SUPPORTS:
+     * - IPv4: 192.168.1.0/24
+     * - IPv6: 2001:db8::/32
      *
      * @param string $ip IP address to check
-     * @param string $cidr CIDR notation (e.g., '192.168.1.0/24')
+     * @param string $cidr CIDR notation (e.g., '192.168.1.0/24' or '2001:db8::/32')
      * @return bool True if IP is in range
      */
     private function ipInCIDR(string $ip, string $cidr): bool
@@ -551,20 +636,78 @@ class WafMiddleware
         }
 
         [$subnet, $mask] = explode('/', $cidr);
+        $mask = (int) $mask;
 
-        // Convert to long integers for bitwise comparison
-        $ipLong = ip2long($ip);
-        $subnetLong = ip2long($subnet);
+        // Validate IP and subnet
+        $isIPv6 = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+        $isSubnetIPv6 = filter_var($subnet, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
 
-        if ($ipLong === false || $subnetLong === false) {
+        // IP and subnet must be same protocol
+        if ($isIPv6 !== $isSubnetIPv6) {
             return false;
         }
 
-        // Calculate subnet mask
-        $maskLong = -1 << (32 - (int) $mask);
+        if ($isIPv6) {
+            // IPv6 CIDR matching
+            return $this->ipv6InCIDR($ip, $subnet, $mask);
+        } else {
+            // IPv4 CIDR matching (original logic)
+            $ipLong = ip2long($ip);
+            $subnetLong = ip2long($subnet);
 
-        // Check if IP is in the network range
-        return ($ipLong & $maskLong) === ($subnetLong & $maskLong);
+            if ($ipLong === false || $subnetLong === false) {
+                return false;
+            }
+
+            // Calculate subnet mask
+            $maskLong = -1 << (32 - $mask);
+
+            // Check if IP is in the network range
+            return ($ipLong & $maskLong) === ($subnetLong & $maskLong);
+        }
+    }
+
+    /**
+     * Check if IPv6 address is within IPv6 CIDR range
+     *
+     * @param string $ip IPv6 address
+     * @param string $subnet IPv6 subnet
+     * @param int $mask CIDR mask (0-128)
+     * @return bool True if IP is in range
+     */
+    private function ipv6InCIDR(string $ip, string $subnet, int $mask): bool
+    {
+        // Convert IPv6 to binary representation
+        $ipBin = inet_pton($ip);
+        $subnetBin = inet_pton($subnet);
+
+        if ($ipBin === false || $subnetBin === false) {
+            return false;
+        }
+
+        // Calculate number of bytes and bits to compare
+        $bytesToCompare = (int) floor($mask / 8);
+        $bitsToCompare = $mask % 8;
+
+        // Compare full bytes
+        for ($i = 0; $i < $bytesToCompare; $i++) {
+            if ($ipBin[$i] !== $subnetBin[$i]) {
+                return false;
+            }
+        }
+
+        // Compare remaining bits in partial byte
+        if ($bitsToCompare > 0 && $bytesToCompare < strlen($ipBin)) {
+            $ipByte = ord($ipBin[$bytesToCompare]);
+            $subnetByte = ord($subnetBin[$bytesToCompare]);
+            $maskByte = (0xFF << (8 - $bitsToCompare)) & 0xFF;
+
+            if (($ipByte & $maskByte) !== ($subnetByte & $maskByte)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -585,5 +728,145 @@ class WafMiddleware
     public function getBotVerifier(): ?BotVerifier
     {
         return $this->botVerifier;
+    }
+
+    /**
+     * Extract real client IP from proxy headers
+     *
+     * Handles Cloudflare, Nginx, AWS ELB, and standard X-Forwarded-For headers.
+     *
+     * SECURITY: Only trusts proxy headers if REMOTE_ADDR matches trusted proxy list.
+     * This prevents IP spoofing attacks.
+     *
+     * Supported Headers (in priority order):
+     * 1. CF-Connecting-IP (Cloudflare)
+     * 2. X-Real-IP (Nginx)
+     * 3. X-Forwarded-For (Standard proxy, takes first IP)
+     * 4. REMOTE_ADDR (Direct connection)
+     *
+     * @param array<string, mixed> $server $_SERVER superglobal
+     * @param array<int, string> $trustedProxies List of trusted proxy IPs/CIDRs
+     * @return string Client IP address
+     */
+    private function extractRealClientIP(array $server, array $trustedProxies = []): string
+    {
+        $remoteAddrRaw = $server['REMOTE_ADDR'] ?? 'unknown';
+        $remoteAddr = is_string($remoteAddrRaw) ? $remoteAddrRaw : 'unknown';
+
+        // If no trusted proxies configured, use REMOTE_ADDR directly
+        if (empty($trustedProxies)) {
+            return $remoteAddr;
+        }
+
+        // Check if REMOTE_ADDR is a trusted proxy
+        $isTrustedProxy = false;
+        foreach ($trustedProxies as $proxy) {
+            // Handle both single IP and CIDR notation
+            $matches = false;
+            if (strpos($proxy, '/') !== false) {
+                $matches = $this->ipInCIDR($remoteAddr, $proxy);
+            } else {
+                $matches = $remoteAddr === $proxy;
+            }
+
+            if ($matches) {
+                $isTrustedProxy = true;
+                break;
+            }
+        }
+
+        // If not from trusted proxy, don't trust headers (spoofing protection)
+        if (!$isTrustedProxy) {
+            return $remoteAddr;
+        }
+
+        // Check proxy headers in priority order
+        $headers = [
+            'HTTP_CF_CONNECTING_IP',  // Cloudflare
+            'HTTP_X_REAL_IP',         // Nginx
+            'HTTP_X_FORWARDED_FOR',   // Standard proxy
+        ];
+
+        foreach ($headers as $header) {
+            $value = $server[$header] ?? null;
+            if (!is_string($value) || $value === '') {
+                continue;
+            }
+
+            // X-Forwarded-For can contain multiple IPs (client, proxy1, proxy2)
+            // Take the FIRST IP (original client)
+            if ($header === 'HTTP_X_FORWARDED_FOR') {
+                $ips = explode(',', $value);
+                $value = trim($ips[0]);
+            }
+
+            // Validate IP
+            if (filter_var($value, FILTER_VALIDATE_IP) !== false) {
+                return $value;
+            }
+        }
+
+        // Fallback to REMOTE_ADDR
+        return $remoteAddr;
+    }
+
+    /**
+     * Record metric (if metrics collector configured)
+     *
+     * @param string $action Action (e.g., 'blocked', 'allowed', 'banned')
+     * @param string $reason Reason (e.g., 'blacklist', 'geo_country', 'sql_injection')
+     * @return void
+     */
+    private function recordMetric(string $action, string $reason): void
+    {
+        if ($this->metrics) {
+            $this->metrics->increment("waf_{$action}_total");
+            $this->metrics->increment("waf_{$action}_{$reason}");
+        }
+    }
+
+    /**
+     * Send webhook notification (if webhooks configured)
+     *
+     * @param string $event Event type
+     * @param array<string, mixed> $data Event data
+     * @return void
+     */
+    private function sendWebhook(string $event, array $data): void
+    {
+        if ($this->webhooks) {
+            $this->webhooks->notify($event, $data);
+        }
+    }
+
+    /**
+     * Get statistics (requires metrics collector)
+     *
+     * @return array<string, float> Statistics
+     */
+    public function getStatistics(): array
+    {
+        if ($this->metrics) {
+            return $this->metrics->getAll();
+        }
+
+        return [];
+    }
+
+    /**
+     * Sanitize params for logging (prevents log poisoning + storage bloat)
+     *
+     * Security: Limits each param to 500 chars, handles non-scalar values
+     * Prevents: Log injection, emoji flood, binary data, UTF-16 attacks
+     *
+     * @param array<string, mixed> $params Raw GET/POST params
+     * @return array<string, string> Sanitized params safe for logging
+     */
+    private function sanitizeParamsForLogging(array $params): array
+    {
+        return array_map(
+            fn($v) => is_scalar($v) ? mb_substr((string)$v, 0, 500) : '[non-scalar]',
+            $params
+        );
     }
 }

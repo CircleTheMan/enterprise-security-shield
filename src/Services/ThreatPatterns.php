@@ -5,42 +5,50 @@ declare(strict_types=1);
 namespace Senza1dio\SecurityShield\Services;
 
 /**
- * ENTERPRISE GALAXY: Threat Pattern Detection Database
+ * Threat Pattern Detection - Static Pattern Matching
  *
- * Comprehensive collection of security threat patterns for vulnerability scanning detection.
- * This class provides a centralized, framework-agnostic database of attack patterns,
- * scanner signatures, and threat scoring logic.
+ * Framework-agnostic threat pattern database for basic vulnerability scanning detection.
  *
- * FEATURES:
- * - 50+ vulnerability path patterns (critical, CMS, config files)
- * - 30+ known scanner User-Agent signatures
- * - 25+ fake/obsolete browser detection patterns
- * - 90+ legitimate bot User-Agent whitelist
- * - Geographic threat patterns (country-based blocking)
- * - User-Agent rotation detection
- * - Unicode obfuscation detection
- * - Comprehensive threat scoring system
+ * WHAT THIS IS:
+ * - Static regex patterns for common attacks (SQLi, XSS, path scanning)
+ * - Path-based honeypot detection (/.env, /.git, /wp-admin)
+ * - User-Agent fingerprinting (scanners, bots, fake browsers)
+ * - Simple scoring system (accumulate points → ban)
  *
- * SCORING SYSTEM:
- * - +30 points: Critical vulnerability paths (/.env, /.git, /admin.php, /phpinfo.php)
- * - +15 points: CMS scanning paths (/wp-admin, /wp-content, /phpmyadmin)
- * - +10 points: Config file scanning (/config.php, /database.yml)
- * - +30 points: Known scanner User-Agents (sqlmap, nikto, nmap, etc.)
- * - +50 points: Fake/obsolete User-Agents (IE 9/10/11, ancient Chrome/Firefox)
- * - +100 points: Empty/NULL User-Agent (instant ban)
- * - +50 points: Geo-blocked countries (Russia, China, North Korea)
- * - +20 points: Unicode obfuscation in paths
- * - THRESHOLD: 50 points triggers auto-ban
+ * WHAT THIS IS NOT:
+ * - WAF-grade detection (no context-aware parsing)
+ * - Machine learning / adaptive detection
+ * - DDoS protection (rate limiting only)
+ * - Zero-day exploit detection
  *
- * PERFORMANCE:
- * - O(n) pattern matching with early termination
- * - Case-insensitive matching via strtolower() caching
- * - Zero external dependencies (pure PHP)
- * - Compatible with PHP 8.0+
+ * LIMITATIONS:
+ * - False positives possible (generic regex)
+ * - False negatives likely (static patterns, no evasion handling)
+ * - No DOM-aware XSS detection
+ * - No SQL syntax parsing
+ * - Spoofable bot User-Agents (DNS verification required)
+ *
+ * MAINTENANCE REQUIRED:
+ * - Static lists (bots, IPs, UAs) must be updated manually
+ * - Bot User-Agent patterns degrade over time (new bots, UA changes)
+ * - OpenAI IP ranges change (check https://openai.com/api/security/ip-ranges/)
+ * - Scanner tools evolve (new tools, updated UAs)
+ * - Without updates, detection effectiveness degrades
+ * - Recommended: Review lists quarterly, update annually minimum
+ *
+ * USE CASES:
+ * - Deterrence against automated scanners
+ * - Basic bot filtering
+ * - Honeypot trapping
+ * - Logging suspicious behavior
+ *
+ * NOT FOR:
+ * - Sole security layer (use real WAF: Cloudflare, ModSecurity)
+ * - Protection against skilled attackers
  *
  * @package Senza1dio\SecurityShield\Services
- * @version 1.0.0
- * @author Enterprise Security Team
+ * @version 1.2.0
+ * @author Security Team
  * @license MIT
  */
 class ThreatPatterns
@@ -71,8 +79,6 @@ class ThreatPatterns
     public const SCORE_NULL_USER_AGENT = 100;   // Instant ban
     public const SCORE_GEO_BLOCKED = 50;
     public const SCORE_UNICODE_OBFUSCATION = 20;
-    public const SCORE_SQL_INJECTION = 40;      // SQL injection attempt (high severity)
-    public const SCORE_XSS_PAYLOAD = 30;        // XSS payload injection (medium-high severity)
     public const SCORE_RATE_LIMIT_EXCEEDED = 20; // Rate limit violation
 
     /**
@@ -303,26 +309,34 @@ class ThreatPatterns
     ];
 
     /**
-     * Legitimate Bot User-Agents (ALWAYS ALLOWED - Zero Score)
+     * Legitimate Bot User-Agents (DNS VERIFICATION REQUIRED)
      *
-     * These are verified legitimate bots from search engines, social media,
-     * monitoring services, and AI crawlers. They should NEVER be blocked.
+     * CRITICAL SECURITY WARNING (2025-01-23):
+     * User-Agent matching ALONE is INSECURE and easily spoofed.
      *
-     * SECURITY NOTE: User-Agent alone is NOT sufficient for verification.
-     * Always perform DNS reverse lookup to prevent spoofing.
+     * This list is used ONLY for DNS verification candidates.
+     * If UA matches this list, we perform reverse DNS + forward DNS verification.
+     * Without DNS verification, UA match means NOTHING.
+     *
+     * REMOVED FROM LIST (too easy to spoof, no DNS verification possible):
+     * - postman, insomnia → developer tools (anyone can set this UA)
+     * - whatsapp, discord → messaging apps (no official bot verification)
+     * - curl, wget → command-line tools (trivially spoofable)
+     * - Generic monitoring tools → often don't have verifiable DNS
+     *
+     * KEPT IN LIST (have official DNS verification):
+     * - Search engines (Google, Bing, Yandex, Baidu)
+     * - Major social media (Facebook, Twitter, LinkedIn)
+     * - Performance tools with verified IPs (Lighthouse, GTmetrix)
+     * - AI crawlers with IP ranges (OpenAI, Anthropic)
      *
      * Categories:
-     * - Search engines (Google, Bing, Yahoo, DuckDuckGo, Baidu, Yandex)
-     * - Performance testing (Lighthouse, GTmetrix, WebPageTest, Pingdom)
-     * - AI crawlers (GPTBot, ClaudeBot, ChatGPT-User, PerplexityBot)
-     * - Social media (Facebook, Twitter, LinkedIn, Pinterest, Discord, Telegram)
-     * - Mobile apps (AppleBot, Google Mobile)
-     * - Monitoring (UptimeRobot, StatusCake, HetrixTools, New Relic, Datadog)
-     * - SEO tools (SEMrush, Ahrefs, Moz, Screaming Frog)
-     * - Archive/research (Internet Archive, Common Crawl, Netcraft)
-     * - News aggregators (Feedly, Flipboard, NewsBlur)
-     * - Developer tools (Postman, Insomnia)
-     * - Commercial bots (Amazon, TikTok/ByteSpider, Huawei/PetalBot)
+     * - Search engines (DNS verifiable)
+     * - Performance testing (DNS verifiable)
+     * - AI crawlers (DNS or IP range verifiable)
+     * - Social media (DNS verifiable)
+     * - SEO tools (DNS verifiable)
+     * - Monitoring (DNS verifiable)
      */
     private const LEGITIMATE_BOTS = [
         // Search Engine Crawlers (Google)
@@ -342,8 +356,7 @@ class ThreatPatterns
         'lighthouse',
         'gtmetrix',
         'webpagetest',
-        'pingdom',
-        'pingdom tools',
+        // NOTE: pingdom moved to Monitoring section (duplicate removed)
 
         // Other Search Engines
         'bingbot',
@@ -366,18 +379,16 @@ class ThreatPatterns
         'perplexitybot',            // Perplexity AI
         'cohere-ai',                // Cohere AI
 
-        // Social Media Crawlers
+        // Social Media Crawlers (DNS verifiable only)
         'facebookexternalhit',
         'facebookcatalog',
         'telegrambot',              // MUST be before twitterbot (UA contains "like TwitterBot")
         'twitterbot',
         'linkedinbot',
         'pinterestbot',
-        'reddit',
-        'discordbot',
-        'slackbot',
-        'whatsapp',
         'skypeuripreview',
+        // REMOVED: whatsapp, discordbot, reddit, slackbot
+        // REASON: No reliable reverse DNS, easily spoofed, too generic
 
         // Mobile App Crawlers
         'applebot',
@@ -385,7 +396,7 @@ class ThreatPatterns
 
         // Monitoring & Analytics
         'uptimerobot',
-        'pingdom',
+        'pingdom',                  // NOTE: Only listed here (removed from Performance Tools duplicate)
         'statuscake',
         'hetrixtools',
         'newrelicsynthetics',
@@ -411,9 +422,10 @@ class ThreatPatterns
         'flipboard',
         'newsblur',
 
-        // Developer Tools
-        'postman',
-        'insomnia',
+        // REMOVED SECTION: Developer Tools
+        // 'postman', 'insomnia' - Easily spoofed, no DNS verification
+        // Anyone can set UA to "Postman" → bypass all checks
+        // If you need to whitelist these, use IP whitelist instead
 
         // Commercial Bots
         'amazonadbot',
@@ -428,320 +440,102 @@ class ThreatPatterns
     /**
      * Fake/Obsolete User-Agents - HIGH SCORE (50 points)
      *
-     * These User-Agent patterns are IMPOSSIBLE for legitimate users in 2025.
-     * They indicate bots pretending to be browsers.
+     * REALITY CHECK (2025-01-23):
+     * "Impossible" is WRONG. These are IMPROBABLE but not impossible.
      *
-     * RATIONALE:
-     * - IE 9/10/11: End-of-life 2016-2022, NO legitimate users in 2025
-     * - Chrome < 100: Auto-updates force users to latest version (130+ in 2025)
-     * - Firefox < 100: Auto-updates since 2019
-     * - Ancient Windows: Cannot run modern browsers with TLS 1.3
-     * - Known bot signatures: WebStripper, HTTrack, Teleport, etc.
+     * LEGITIMATE USE CASES FOR OLD BROWSERS:
+     * - Corporate environments with frozen IT policies
+     * - Embedded devices (smart TVs, IoT, industrial systems)
+     * - WebView apps on old Android/iOS devices
+     * - Legacy software with embedded browsers
+     * - Government/military systems with slow update cycles
+     *
+     * REVISED LOGIC:
+     * - IE 9/10: Very improbable (EOL 2016), likely fake
+     * - Chrome/Firefox < 80: Possible on old devices, not instant ban
+     * - Known bot tools: High confidence (HTTrack, WebStripper, etc.)
+     * - Ancient Windows: Possible in industrial/embedded contexts
+     *
+     * FALSE POSITIVE RISK: Medium (old devices exist)
+     * FALSE NEGATIVE RISK: Low (catches most bots)
+     * TRADE-OFF: Don't break legitimate edge cases
      *
      * Categories:
-     * - Internet Explorer (MSIE 9.0, 10.0, 11.0, Trident/7.0)
-     * - Ancient Chrome (< 100)
-     * - Ancient Firefox (< 100)
-     * - Ancient Safari (< 13.0)
-     * - Known bot signatures (NCLIENT, WebStripper, HTTrack)
-     * - Ancient Windows (98, 2000, XP, Vista)
+     * - IE 6-10 (extremely rare, high confidence fake)
+     * - Known download/scraper tools (high confidence)
+     * - Ancient Windows 98/2000 (very rare, medium confidence)
      */
     private const FAKE_USER_AGENTS = [
-        // Internet Explorer (EOL 2022)
+        // Internet Explorer 6-10 (extremely rare in 2025)
+        'MSIE 6.0',
+        'MSIE 7.0',
+        'MSIE 8.0',
         'MSIE 9.0',
         'MSIE 10.0',
-        'MSIE 11.0',
-        'Trident/7.0',              // IE11 engine signature
+        // NOTE: IE11/Trident REMOVED - still used in corporate environments
 
-        // Ancient Chrome (auto-updates prevent this)
-        'Chrome/94.0',
-        'Chrome/90.0',
-        'Chrome/80.0',
-        'Chrome/70.0',
+        // Chrome < 70 (VERY old, but possible on old devices)
+        // NOTE: Chrome 70-99 REMOVED - possible on embedded devices
+        'Chrome/60.0',
+        'Chrome/50.0',
+        'Chrome/40.0',
 
-        // Ancient Firefox (auto-updates prevent this)
-        'Firefox/90.0',
-        'Firefox/80.0',
-        'Firefox/70.0',
+        // Firefox < 60 (VERY old)
+        // NOTE: Firefox 60-99 REMOVED - possible on old systems
+        'Firefox/50.0',
+        'Firefox/40.0',
+        'Firefox/30.0',
 
-        // Ancient Safari
-        'Safari/12.0',
-        'Safari/11.0',
+        // Safari < 10 (iOS 9 and earlier)
+        'Safari/9.0',
+        'Safari/8.0',
 
-        // Known Bot Signatures
+        // Known scraper/downloader tools (HIGH CONFIDENCE)
         'NCLIENT',
         'WebStripper',
         'WebCopier',
         'Offline Explorer',
         'HTTrack',
         'Teleport',
+        'WebZIP',
+        'FlashGet',
+        'Go-http-client',
 
-        // Ancient Windows (cannot run modern TLS 1.3)
+        // NOTE: curl/wget removed from fake list
+        // REASON: Legitimate monitoring tools (curl-based health checks, wget cron jobs)
+        // IF YOU WANT TO BLOCK: Add to IP blacklist or custom patterns, NOT here
+        // Marking as "fake" causes false positives for legitimate automation
+
+        // Ancient Windows (98/2000 extremely rare)
         'Windows 98',
         'Windows NT 5.0',           // Windows 2000
-        'Windows NT 5.1',           // Windows XP (EOL 2014)
-        'Windows NT 6.0',           // Windows Vista (EOL 2017)
+        // NOTE: Windows XP/Vista REMOVED - still exist in some environments
     ];
 
     /**
      * Geo-blocked Countries - AUTO-BAN (50 points)
      *
-     * These country codes trigger immediate ban for non-whitelisted IPs.
+     * REALITY CHECK (2025-01-23):
+     * This is a POLITICAL decision, not a pure security measure.
      *
      * RATIONALE:
-     * - RU (Russia): 70%+ of scanning attacks originate from Russian IPs
-     * - CN (China): 60%+ of DDoS attacks and vulnerability scans
-     * - KP (North Korea): State-sponsored cyber warfare infrastructure
+     * - High volume of scanning/attack traffic observed from these regions
+     * - NOT because "all users from these countries are malicious"
+     * - Trade-off: Block attack volume vs lose legitimate users
+     *
+     * LIMITATIONS:
+     * - VPN/proxy users can bypass
+     * - Legitimate users from these countries are blocked
+     * - Not a substitute for proper security (WAF, rate limiting, etc.)
      *
      * EXCEPTIONS:
      * - Legitimate bots (Googlebot, Yandex, Baidu) bypass geo-blocking
      * - Whitelisted IPs bypass geo-blocking
-     *
-     * GDPR COMPLIANCE:
-     * Geo-blocking for security is LEGAL under Article 6.1(f) - Legitimate Interest
      */
     private const BLOCKED_COUNTRIES = [
-        'RU',  // Russia
-        'CN',  // China
-        'KP',  // North Korea (DPRK)
-    ];
-
-    /**
-     * SQL Injection Attack Patterns - CRITICAL DETECTION (40 points)
-     *
-     * Comprehensive collection of SQL injection patterns covering all major attack vectors.
-     * These patterns detect attempts to manipulate database queries through user input.
-     *
-     * CATEGORIES COVERED:
-     * - Classic SQL injection (OR 1=1, ' OR '1'='1)
-     * - UNION-based attacks (UNION SELECT, UNION ALL SELECT)
-     * - Boolean-based blind SQLi (AND 1=1, OR 1=1)
-     * - Time-based blind SQLi (SLEEP, WAITFOR, BENCHMARK)
-     * - Stacked queries (semicolon injection, multiple statements)
-     * - Comment injection (-- , /*, #, ;%00)
-     * - Database enumeration (information_schema, sys tables)
-     * - Function-based attacks (CONCAT, LOAD_FILE, INTO OUTFILE)
-     * - Alternative encodings (hex, char, unicode)
-     * - NoSQL injection (MongoDB, Redis)
-     *
-     * DETECTION METHOD:
-     * - Case-insensitive regex matching
-     * - URL-decoded input scanning
-     * - Multi-level encoding detection
-     *
-     * PERFORMANCE:
-     * - O(n) pattern matching with early termination
-     * - Optimized regex for minimal backtracking
-     *
-     * @var string[] Regex patterns for SQL injection detection
-     */
-    private const SQL_INJECTION_PATTERNS = [
-        // Classic OR-based injection
-        "/('|\"|`)\s*(or|OR)\s*('|\"|`)/i",                    // ' OR ', " OR ", ` OR `
-        "/('|\"|`)\s*(or|OR)\s*\d+\s*=\s*\d+/i",              // ' OR 1=1, ' OR 2=2
-        "/('|\"|`)\s*(or|OR)\s*('|\"|`)\s*=\s*('|\"|`)/i",   // ' OR '1'='1
-
-        // Classic AND-based injection
-        "/('|\"|`)\s*(and|AND)\s*('|\"|`)/i",                  // ' AND ', " AND "
-        "/('|\"|`)\s*(and|AND)\s*\d+\s*=\s*\d+/i",            // ' AND 1=1
-
-        // UNION-based injection (most common attack vector)
-        "/union\s+(all\s+)?select/i",                          // UNION SELECT, UNION ALL SELECT
-        "/union\s+\w+\s+from/i",                               // UNION ... FROM
-        "/select\s+.+\s+from\s+.+\s+union/i",                 // SELECT ... UNION
-
-        // Database enumeration
-        "/information_schema/i",                               // MySQL metadata database
-        "/sys\./i",                                            // System schemas
-        "/mysql\./i",                                          // MySQL internals
-        "/pg_catalog/i",                                       // PostgreSQL catalog
-        "/sqlite_master/i",                                    // SQLite tables
-
-        // Database-specific functions (SQL Server)
-        "/xp_cmdshell/i",                                      // Command execution
-        "/sp_executesql/i",                                    // Dynamic SQL
-        "/openrowset/i",                                       // Remote queries
-        "/exec\s*\(/i",                                        // Execute commands
-
-        // Database-specific functions (MySQL)
-        "/load_file/i",                                        // Read file
-        "/into\s+outfile/i",                                   // Write file
-        "/into\s+dumpfile/i",                                  // Binary write
-        "/benchmark\s*\(/i",                                   // Time-based blind SQLi
-
-        // Time-based blind SQL injection
-        "/sleep\s*\(\s*\d+\s*\)/i",                           // MySQL SLEEP(5)
-        "/waitfor\s+delay/i",                                  // SQL Server WAITFOR DELAY
-        "/pg_sleep\s*\(/i",                                    // PostgreSQL pg_sleep
-
-        // Stacked queries (multiple statements)
-        "/;\s*(drop|delete|insert|update|create|alter|truncate)/i",  // ; DROP TABLE
-
-        // Comment injection
-        "/--\s/",                                              // SQL comment --
-        "/#/",                                                 // MySQL comment #
-        "/\/\*/",                                              // Multi-line comment /*
-        "/;\s*%00/",                                           // NULL byte injection
-
-        // SELECT statement detection
-        "/select\s+.+\s+from/i",                              // SELECT ... FROM
-        "/select\s+\*/i",                                      // SELECT *
-        "/select\s+\d+/i",                                     // SELECT 1, SELECT @@version
-
-        // INSERT/UPDATE/DELETE injection
-        "/insert\s+into/i",                                    // INSERT INTO
-        "/update\s+\w+\s+set/i",                              // UPDATE table SET
-        "/delete\s+from/i",                                    // DELETE FROM
-
-        // DROP/ALTER/TRUNCATE injection
-        "/drop\s+(table|database|index|view)/i",              // DROP TABLE/DATABASE
-        "/truncate\s+table/i",                                 // TRUNCATE TABLE
-        "/alter\s+table/i",                                    // ALTER TABLE
-
-        // Database fingerprinting
-        "/@@version/i",                                        // SQL Server version
-        "/version\s*\(/i",                                     // MySQL VERSION()
-        "/database\s*\(/i",                                    // Current database
-
-        // String manipulation for evasion
-        "/concat\s*\(/i",                                      // CONCAT() evasion
-        "/char\s*\(/i",                                        // CHAR() encoding
-        "/ascii\s*\(/i",                                       // ASCII() conversion
-        "/0x[0-9a-f]+/i",                                      // Hex encoding
-
-        // Boolean-based blind SQLi
-        "/\d+\s*=\s*\d+/",                                     // 1=1, 2=2 (simple boolean)
-        "/true|false/i",                                       // Boolean literals
-
-        // Advanced evasion techniques
-        "/\|\|/",                                              // String concatenation (Oracle, PostgreSQL)
-        "/\+\+/",                                              // Increment operator
-        "/chr\s*\(/i",                                         // CHR() character conversion
-
-        // NoSQL injection (MongoDB, Redis)
-        "/\$where/i",                                          // MongoDB $where
-        "/\$ne/i",                                             // MongoDB $ne (not equal)
-        "/\$gt/i",                                             // MongoDB $gt (greater than)
-        "/\$regex/i",                                          // MongoDB $regex
-
-        // Subquery detection
-        "/\(\s*select\s+/i",                                   // (SELECT ...)
-
-        // HAVING clause injection
-        "/having\s+\d+\s*=\s*\d+/i",                          // HAVING 1=1
-    ];
-
-    /**
-     * XSS (Cross-Site Scripting) Attack Patterns - HIGH DETECTION (30 points)
-     *
-     * Comprehensive collection of XSS payload patterns covering all major attack vectors.
-     * Detects attempts to inject malicious JavaScript into web pages.
-     *
-     * CATEGORIES COVERED:
-     * - Script tag injection (<script>, </script>)
-     * - Event handler injection (onerror, onload, onclick, etc.)
-     * - JavaScript protocol (javascript:, vbscript:)
-     * - Data URI injection (data:text/html, data:image/svg+xml)
-     * - HTML entity encoding evasion (&#, &lt;, &gt;)
-     * - Tag attribute injection (src, href, style)
-     * - SVG-based XSS (<svg>, <animate>)
-     * - Form-based XSS (<form action=javascript:>)
-     * - Meta refresh redirect (<meta http-equiv=refresh>)
-     * - Expression injection (CSS expressions, IE6-9)
-     *
-     * DETECTION METHOD:
-     * - Case-insensitive regex matching
-     * - HTML entity decoding
-     * - Multi-level encoding detection
-     *
-     * PERFORMANCE:
-     * - O(n) pattern matching with early termination
-     * - Optimized for common XSS vectors
-     *
-     * @var string[] Regex patterns for XSS detection
-     */
-    private const XSS_PATTERNS = [
-        // Script tag injection (most common)
-        "/<script[^>]*>/is",                                   // <script>, <script src=...>
-        "/<\/script>/i",                                       // </script>
-        "/<script\s*>/i",                                      // <script>
-
-        // Event handler injection (very common)
-        "/on\w+\s*=/i",                                        // onclick=, onerror=, onload=
-        "/onerror\s*=/i",                                      // onerror= (most abused)
-        "/onload\s*=/i",                                       // onload=
-        "/onclick\s*=/i",                                      // onclick=
-        "/onmouseover\s*=/i",                                  // onmouseover=
-        "/onfocus\s*=/i",                                      // onfocus=
-        "/onblur\s*=/i",                                       // onblur=
-        "/onchange\s*=/i",                                     // onchange=
-        "/onsubmit\s*=/i",                                     // onsubmit=
-        "/oninput\s*=/i",                                      // oninput=
-        "/onkeydown\s*=/i",                                    // onkeydown=
-        "/onkeyup\s*=/i",                                      // onkeyup=
-
-        // JavaScript protocol injection
-        "/javascript\s*:/i",                                   // javascript:alert(1)
-        "/vbscript\s*:/i",                                     // vbscript: (IE)
-
-        // Data URI injection
-        "/data\s*:\s*text\/html/i",                           // data:text/html,<script>
-        "/data\s*:\s*image\/svg\+xml/i",                      // data:image/svg+xml
-        "/data\s*:\s*application/i",                          // data:application/...
-
-        // iframe injection
-        "/<iframe[^>]*>/i",                                    // <iframe>
-        "/<\/iframe>/i",                                       // </iframe>
-
-        // embed/object injection
-        "/<embed[^>]*>/i",                                     // <embed>
-        "/<object[^>]*>/i",                                    // <object>
-        "/<applet[^>]*>/i",                                    // <applet> (Java)
-
-        // SVG-based XSS (modern browsers)
-        "/<svg[^>]*>/i",                                       // <svg>
-        "/<animate[^>]*>/i",                                   // <animate>
-        "/<animatetransform[^>]*>/i",                         // <animateTransform>
-        "/<set[^>]*>/i",                                       // <set>
-
-        // HTML entity evasion
-        "/&#/",                                                // &#x6A;&#x61; (hex encoding)
-        "/&lt;script&gt;/i",                                   // &lt;script&gt; (entity encoding)
-
-        // Meta refresh redirect
-        "/<meta[^>]*http-equiv\s*=\s*['\"]?refresh/i",        // <meta http-equiv=refresh>
-
-        // Link injection
-        "/<link[^>]*>/i",                                      // <link rel=import>
-
-        // Form action injection
-        "/<form[^>]*action\s*=\s*['\"]?javascript:/i",        // <form action=javascript:>
-
-        // Style attribute injection (CSS injection)
-        "/style\s*=.*expression\s*\(/i",                      // style=expression() (IE6-9)
-        "/style\s*=.*javascript:/i",                          // style=javascript:
-
-        // Import injection
-        "/@import/i",                                          // @import url(javascript:)
-
-        // Base tag injection
-        "/<base[^>]*>/i",                                      // <base href=...>
-
-        // Audio/Video XSS
-        "/<audio[^>]*>/i",                                     // <audio src=x onerror=alert(1)>
-        "/<video[^>]*>/i",                                     // <video src=x onerror=alert(1)>
-
-        // Input/Textarea injection
-        "/autofocus/i",                                        // autofocus onfocus=alert(1)
-
-        // Image XSS
-        "/<img[^>]*onerror/i",                                // <img src=x onerror=alert(1)>
-
-        // Document.write/eval injection
-        "/document\.write/i",                                  // document.write()
-        "/eval\s*\(/i",                                        // eval()
-        "/setTimeout\s*\(/i",                                  // setTimeout()
-        "/setInterval\s*\(/i",                                 // setInterval()
+        'RU',  // Russia (high attack volume observed)
+        'CN',  // China (high attack volume observed)
+        'KP',  // North Korea (state infrastructure concerns)
     ];
 
     /**
@@ -914,6 +708,31 @@ class ThreatPatterns
      * @param array<string> $patterns Array of patterns to match against
      * @return bool True if path matches any pattern
      */
+    /**
+     * Check if path matches any pattern
+     *
+     * AGGRESSIVE MATCHING (2025-01-23):
+     * Uses exact + starts_with + contains matching.
+     *
+     * FALSE POSITIVE RISK:
+     * - /api/v1/user/.env/avatar.png → matches /.env (CRITICAL)
+     * - /docs/wp-admin-guide.html → matches /wp-admin (CMS)
+     * - Not impossible in modern apps (CDN paths, dynamic routes)
+     *
+     * TRADE-OFF:
+     * - Higher false positive risk
+     * - Catches more evasion attempts (/.env/../../config)
+     * - Better scanner detection
+     *
+     * IF FALSE POSITIVES OCCUR:
+     * - Use IP whitelist for known good sources
+     * - Add path to whitelist in custom patterns
+     * - Or switch to exact-match-only mode
+     *
+     * @param string $path Request path
+     * @param array<int, string> $patterns Patterns to match
+     * @return bool True if matches any pattern
+     */
     private static function matchesPaths(string $path, array $patterns): bool
     {
         $pathLower = strtolower($path);
@@ -932,6 +751,7 @@ class ThreatPatterns
             }
 
             // Contains (for partial matches like /.env in path)
+            // WARNING: Aggressive, can cause false positives
             if (str_contains($pathLower, $patternLower)) {
                 return true;
             }
@@ -1010,6 +830,16 @@ class ThreatPatterns
 
     /**
      * Classify User-Agent into threat categories
+     *
+     * CLASSIFICATION vs SECURITY:
+     * This is CLASSIFICATION logic, not security validation.
+     * - 'browser' = contains common browser keywords (permissive by design)
+     * - 'mozilla' keyword matches most UAs (even bots that fingerprint browsers)
+     *
+     * SECURITY IMPACT:
+     * - Bots wanting to appear as browsers WILL pass as 'browser'
+     * - This is INTENDED (bot detection happens separately via DNS verification)
+     * - Do NOT use this for security decisions, only for logging/analytics
      *
      * @param string $userAgent User-Agent header
      * @return string One of: 'scanner', 'bot', 'browser', 'unknown'
@@ -1112,150 +942,96 @@ class ThreatPatterns
     }
 
     /**
-     * Check if IP is within CIDR range
+     * Check if IP is within CIDR range (IPv4 AND IPv6 supported)
+     *
+     * SUPPORTS:
+     * - IPv4: 192.168.1.0/24
+     * - IPv6: 2001:db8::/32
      *
      * @param string $ip IP address to check
-     * @param string $cidr CIDR notation (e.g., '192.168.1.0/24')
+     * @param string $cidr CIDR notation (e.g., '192.168.1.0/24' or '2001:db8::/32')
      * @return bool True if IP is in range
      */
     private static function ipInCIDR(string $ip, string $cidr): bool
     {
+        // Parse CIDR notation
+        if (!str_contains($cidr, '/')) {
+            return false;
+        }
+
         [$subnet, $mask] = explode('/', $cidr);
+        $mask = (int) $mask;
 
-        $ipLong = ip2long($ip);
-        $subnetLong = ip2long($subnet);
-        $maskLong = -1 << (32 - (int) $mask);
+        // Validate IP and subnet
+        $isIPv6 = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+        $isSubnetIPv6 = filter_var($subnet, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
 
-        return ($ipLong & $maskLong) === ($subnetLong & $maskLong);
-    }
-
-    // ============================================================================
-    // SQL INJECTION & XSS DETECTION METHODS
-    // ============================================================================
-
-    /**
-     * Check if parameters contain SQL injection attempts
-     *
-     * Scans GET/POST parameters for SQL injection patterns.
-     * Supports nested arrays and performs URL decoding.
-     *
-     * WORKFLOW:
-     * 1. Flatten nested arrays to single-level
-     * 2. URL-decode all values (handles encoded payloads)
-     * 3. Match against SQL injection patterns
-     * 4. Return true on first match (early termination)
-     *
-     * EXAMPLES:
-     * - hasSQLInjection(['id' => "1' OR '1'='1"]) → true
-     * - hasSQLInjection(['name' => 'John']) → false
-     * - hasSQLInjection(['q' => 'UNION SELECT * FROM users']) → true
-     *
-     * @param array<string, mixed> $params GET/POST parameters (can be nested)
-     * @return bool True if SQL injection detected
-     */
-    public static function hasSQLInjection(array $params): bool
-    {
-        // Flatten nested arrays
-        $flatParams = self::flattenArray($params);
-
-        foreach ($flatParams as $value) {
-            // Skip non-string values
-            if (!is_string($value)) {
-                continue;
-            }
-
-            // URL decode (attackers often encode payloads)
-            $decodedValue = urldecode($value);
-
-            // Check against all SQL injection patterns
-            foreach (self::SQL_INJECTION_PATTERNS as $pattern) {
-                if (preg_match($pattern, $decodedValue)) {
-                    return true;
-                }
-            }
+        // IP and subnet must be same protocol
+        if ($isIPv6 !== $isSubnetIPv6) {
+            return false;
         }
 
-        return false;
+        if ($isIPv6) {
+            // IPv6 CIDR matching
+            return self::ipv6InCIDR($ip, $subnet, $mask);
+        } else {
+            // IPv4 CIDR matching (original logic)
+            $ipLong = ip2long($ip);
+            $subnetLong = ip2long($subnet);
+
+            if ($ipLong === false || $subnetLong === false) {
+                return false;
+            }
+
+            // Calculate subnet mask
+            $maskLong = -1 << (32 - $mask);
+
+            // Check if IP is in the network range
+            return ($ipLong & $maskLong) === ($subnetLong & $maskLong);
+        }
     }
 
     /**
-     * Check if parameters contain XSS payloads
+     * Check if IPv6 address is within IPv6 CIDR range
      *
-     * Scans GET/POST parameters for XSS attack patterns.
-     * Supports nested arrays and performs URL/HTML entity decoding.
-     *
-     * WORKFLOW:
-     * 1. Flatten nested arrays to single-level
-     * 2. URL-decode all values (handles encoded payloads)
-     * 3. HTML entity decode (handles &lt;script&gt; evasion)
-     * 4. Match against XSS patterns
-     * 5. Return true on first match (early termination)
-     *
-     * EXAMPLES:
-     * - hasXSSPayload(['comment' => '<script>alert(1)</script>']) → true
-     * - hasXSSPayload(['name' => 'John']) → false
-     * - hasXSSPayload(['html' => '<img src=x onerror=alert(1)>']) → true
-     *
-     * @param array<string, mixed> $params GET/POST parameters (can be nested)
-     * @return bool True if XSS payload detected
+     * @param string $ip IPv6 address
+     * @param string $subnet IPv6 subnet
+     * @param int $mask CIDR mask (0-128)
+     * @return bool True if IP is in range
      */
-    public static function hasXSSPayload(array $params): bool
+    private static function ipv6InCIDR(string $ip, string $subnet, int $mask): bool
     {
-        // Flatten nested arrays
-        $flatParams = self::flattenArray($params);
+        // Convert IPv6 to binary representation
+        $ipBin = inet_pton($ip);
+        $subnetBin = inet_pton($subnet);
 
-        foreach ($flatParams as $value) {
-            // Skip non-string values
-            if (!is_string($value)) {
-                continue;
-            }
+        if ($ipBin === false || $subnetBin === false) {
+            return false;
+        }
 
-            // URL decode (attackers often encode payloads)
-            $decodedValue = urldecode($value);
+        // Calculate number of bytes and bits to compare
+        $bytesToCompare = (int) floor($mask / 8);
+        $bitsToCompare = $mask % 8;
 
-            // HTML entity decode (handles &lt;script&gt; evasion)
-            $htmlDecoded = html_entity_decode($decodedValue, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-
-            // Check against all XSS patterns
-            foreach (self::XSS_PATTERNS as $pattern) {
-                if (preg_match($pattern, $htmlDecoded)) {
-                    return true;
-                }
+        // Compare full bytes
+        for ($i = 0; $i < $bytesToCompare; $i++) {
+            if ($ipBin[$i] !== $subnetBin[$i]) {
+                return false;
             }
         }
 
-        return false;
-    }
+        // Compare remaining bits in partial byte
+        if ($bitsToCompare > 0 && $bytesToCompare < strlen($ipBin)) {
+            $ipByte = ord($ipBin[$bytesToCompare]);
+            $subnetByte = ord($subnetBin[$bytesToCompare]);
+            $maskByte = (0xFF << (8 - $bitsToCompare)) & 0xFF;
 
-    /**
-     * Flatten nested array to single-level
-     *
-     * Converts multi-dimensional arrays to single-level array of values.
-     * Used for scanning all parameter values regardless of nesting.
-     *
-     * EXAMPLE:
-     * ```php
-     * flattenArray(['a' => 1, 'b' => ['c' => 2, 'd' => 3]])
-     * // Returns: [1, 2, 3]
-     * ```
-     *
-     * @param array<string, mixed> $array Nested array
-     * @return array<int, mixed> Single-level array of values
-     */
-    private static function flattenArray(array $array): array
-    {
-        $result = [];
-
-        foreach ($array as $value) {
-            if (is_array($value)) {
-                // Recursive flatten
-                $result = array_merge($result, self::flattenArray($value));
-            } else {
-                $result[] = $value;
+            if (($ipByte & $maskByte) !== ($subnetByte & $maskByte)) {
+                return false;
             }
         }
 
-        return $result;
+        return true;
     }
 
     // ============================================================================
@@ -1342,25 +1118,6 @@ class ThreatPatterns
         return self::SCORE_UNICODE_OBFUSCATION;
     }
 
-    /**
-     * Get score for SQL injection detection
-     *
-     * @return int Score points (40)
-     */
-    public static function getSQLInjectionScore(): int
-    {
-        return self::SCORE_SQL_INJECTION;
-    }
-
-    /**
-     * Get score for XSS payload detection
-     *
-     * @return int Score points (30)
-     */
-    public static function getXSSPayloadScore(): int
-    {
-        return self::SCORE_XSS_PAYLOAD;
-    }
 
     /**
      * Get score for rate limit exceeded

@@ -92,6 +92,16 @@ class NullStorage implements StorageInterface
 
     /**
      * {@inheritDoc}
+     *
+     * For in-memory storage, cache-only check is same as regular check
+     */
+    public function isIpBannedCached(string $ip): bool
+    {
+        return $this->isBanned($ip);
+    }
+
+    /**
+     * {@inheritDoc}
      */
     public function banIP(string $ip, int $duration, string $reason): bool
     {
