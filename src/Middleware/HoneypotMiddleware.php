@@ -7,9 +7,11 @@ namespace Senza1dio\SecurityShield\Middleware;
 use Senza1dio\SecurityShield\Config\SecurityConfig;
 use Senza1dio\SecurityShield\Contracts\LoggerInterface;
 use Senza1dio\SecurityShield\Contracts\StorageInterface;
+use Senza1dio\SecurityShield\Exceptions\HoneypotAccessException;
+use Senza1dio\SecurityShield\Utils\IPUtils;
 
 /**
- * Enterprise Honeypot Middleware - Framework-Agnostic Trap System
+ * Honeypot Middleware - Framework-Agnostic Trap System
  *
  * MISSION:
  * Detect and instantly ban attackers accessing honeypot endpoints.
@@ -88,6 +90,9 @@ class HoneypotMiddleware
 
     /** @var array<string, mixed> Collected intelligence data */
     private array $intelligence = [];
+
+    /** @var array<string> Trusted proxy IPs/CIDRs for IP extraction */
+    private array $trustedProxies = [];
 
     /**
      * Default honeypot paths (50+ traps)
@@ -191,14 +196,23 @@ class HoneypotMiddleware
         $this->honeypotPaths = empty($honeypotPaths) ? self::DEFAULT_HONEYPOT_PATHS : $honeypotPaths;
         $this->storage = $config->getStorage();
         $this->logger = $config->getLogger();
+        $this->trustedProxies = $config->getTrustedProxies();
 
-        // Build O(1) hash map for exact path matches (performance optimization)
-        // Prefix/wildcard paths stay in $honeypotPaths for linear search
+        // Build O(1) hash maps for fast path matching
+        // Separate maps for exact paths and directory prefixes
         foreach ($this->honeypotPaths as $path) {
-            // Only exact paths (no wildcards, no trailing slash for directory traps)
-            if (!str_contains($path, '*') && !str_ends_with($path, '/')) {
-                $normalized = rtrim($path, '/');
-                $this->honeypotExactPaths[$normalized] = true;
+            // Skip wildcards - they need regex matching
+            if (str_contains($path, '*')) {
+                continue;
+            }
+
+            // Normalize: remove trailing slash for exact match
+            $normalized = rtrim($path, '/');
+            $this->honeypotExactPaths[$normalized] = true;
+
+            // Also add with trailing slash for directories
+            if (str_ends_with($path, '/')) {
+                $this->honeypotExactPaths[$path] = true;
             }
         }
     }
@@ -244,24 +258,60 @@ class HoneypotMiddleware
     }
 
     /**
+     * Set trusted proxies for IP extraction
+     *
+     * Must be called before handle() for correct IP resolution behind proxies.
+     *
+     * @param array<string> $proxies List of trusted proxy IPs/CIDRs
+     * @return self
+     */
+    public function setTrustedProxies(array $proxies): self
+    {
+        $this->trustedProxies = $proxies;
+        return $this;
+    }
+
+    /**
      * Handle honeypot access (ban + gather intelligence + fake response)
      *
-     * This method NEVER returns normally - it always exits with fake response
+     * THROWS HoneypotAccessException with fake response content.
+     * Caller must catch and output the response.
+     *
+     * WHY EXCEPTION INSTEAD OF exit():
+     * - Works with long-running processes (Swoole, RoadRunner, ReactPHP)
+     * - Testable with PHPUnit (no exit during tests)
+     * - Allows cleanup handlers to run (fastcgi_finish_request)
+     *
+     * USAGE:
+     * ```php
+     * try {
+     *     $honeypot->handle($_SERVER);
+     * } catch (HoneypotAccessException $e) {
+     *     echo $e->getResponse();
+     *     exit; // or return for long-running
+     * }
+     * ```
      *
      * @param array<string, mixed> $server $_SERVER superglobal
      * @param array<string, mixed> $get $_GET superglobal (default: [])
      * @param array<string, mixed> $post $_POST superglobal (default: [])
-     * @return bool Always returns true (for testing), but exits before return
+     * @return bool True if not a honeypot access (pass-through)
+     * @throws HoneypotAccessException When honeypot path accessed
      */
     public function handle(array $server, array $get = [], array $post = []): bool
     {
-        // Extract request data
-        $clientIPRaw = $server['REMOTE_ADDR'] ?? 'unknown';
-        $clientIP = is_string($clientIPRaw) ? $clientIPRaw : 'unknown';
-
         $requestURIRaw = $server['REQUEST_URI'] ?? '/';
         $requestURI = is_string($requestURIRaw) ? $requestURIRaw : '/';
         $requestPath = $this->normalizePath($requestURI);
+
+        // FAST PATH: Check if this is a honeypot path
+        if (!$this->isHoneypotPath($requestURI)) {
+            // Not a honeypot - allow request to continue
+            return true;
+        }
+
+        // HONEYPOT DETECTED - Process attack
+        $clientIP = IPUtils::extractClientIP($server, $this->trustedProxies);
 
         $userAgentRaw = $server['HTTP_USER_AGENT'] ?? '';
         $userAgent = is_string($userAgentRaw) ? $userAgentRaw : '';
@@ -278,11 +328,11 @@ class HoneypotMiddleware
         // Step 3: Log security event
         $this->logHoneypotAccess($clientIP, $requestPath, $userAgent);
 
-        // Step 4: Send fake response (never returns - exits after output)
-        $this->sendFakeResponse($requestPath);
+        // Step 4: Generate fake response and throw exception
+        // Caller should catch HoneypotAccessException and send response
+        $response = $this->generateFakeResponse($requestPath);
 
-        // Never reached, but return true for unit testing
-        return true;
+        throw new HoneypotAccessException($response, $clientIP, $requestPath);
     }
 
     /**
@@ -298,14 +348,12 @@ class HoneypotMiddleware
     }
 
     /**
-     * Send fake response to confuse attacker
-     *
-     * This method ALWAYS exits after sending output
+     * Generate fake response based on path type
      *
      * @param string $path Honeypot path
-     * @return string Response content (for testing - never returned in production)
+     * @return string Response content
      */
-    public function sendFakeResponse(string $path): string
+    public function generateFakeResponse(string $path): string
     {
         // Add random delay (100-500ms) to slow down scanners
         usleep(random_int(100000, 500000));
@@ -314,46 +362,48 @@ class HoneypotMiddleware
         $pathLower = strtolower($path);
 
         if (str_contains($pathLower, '.env')) {
-            $response = $this->generateFakeEnvFile();
+            return $this->generateFakeEnvFile();
         } elseif (str_contains($pathLower, 'phpinfo')) {
-            $response = $this->generateFakePhpInfo();
+            return $this->generateFakePhpInfo();
         } elseif (str_contains($pathLower, 'wp-admin') || str_contains($pathLower, 'wp-login')) {
-            $response = $this->generateFakeWordPressLogin();
+            return $this->generateFakeWordPressLogin();
         } elseif (str_contains($pathLower, '.git')) {
-            $response = $this->generateFakeGitConfig();
+            return $this->generateFakeGitConfig();
         } elseif (str_contains($pathLower, 'graphql')) {
-            $response = $this->generateFakeGraphQL();
+            return $this->generateFakeGraphQL();
         } elseif (str_contains($pathLower, 'swagger') || str_contains($pathLower, 'openapi')) {
-            $response = $this->generateFakeSwagger();
+            return $this->generateFakeSwagger();
         } elseif (str_contains($pathLower, 'api/')) {
-            $response = $this->generateFakeAPI($path);
+            return $this->generateFakeAPI($path);
         } elseif (str_contains($pathLower, '.sql') || str_contains($pathLower, 'backup') || str_contains($pathLower, 'dump')) {
-            $response = $this->generateFakeSQLDump();
+            return $this->generateFakeSQLDump();
         } elseif (str_contains($pathLower, 'config') || str_contains($pathLower, 'settings')) {
-            $response = $this->generateFakeConfigFile();
+            return $this->generateFakeConfigFile();
         } elseif (str_contains($pathLower, 'debug') || str_contains($pathLower, 'log')) {
-            $response = $this->generateFakeDebugLog();
+            return $this->generateFakeDebugLog();
         } elseif (str_contains($pathLower, '.aws') || str_contains($pathLower, '.ssh')) {
-            $response = $this->generateFakeCloudCredentials($path);
+            return $this->generateFakeCloudCredentials($path);
         } else {
-            $response = $this->generateGeneric404();
+            return $this->generateGeneric404();
         }
+    }
 
-        // In production, exit after sending response
-        // In testing, return response for assertions
-        if (PHP_SAPI !== 'cli') {
-            echo $response;
-            exit;
-        }
-
-        return $response;
+    /**
+     * @deprecated Use handle() which throws HoneypotAccessException instead
+     */
+    public function sendFakeResponse(string $path): string
+    {
+        return $this->generateFakeResponse($path);
     }
 
     /**
      * Normalize request path for matching
      *
+     * NOTE: We keep trailing slashes to properly match directory honeypots.
+     * Both /wp-admin and /wp-admin/ should be detected.
+     *
      * @param string $path Raw request path
-     * @return string Normalized path
+     * @return string Normalized path (lowercase, no query string)
      */
     private function normalizePath(string $path): string
     {
@@ -362,15 +412,41 @@ class HoneypotMiddleware
         $path = (is_string($parsedPath)) ? $parsedPath : $path;
 
         // URL decode (rawurldecode prevents + → space conversion for path security)
-        $path = rawurldecode($path);
+        // Apply multiple times to handle double-encoding attacks (%252e%252e%252f)
+        // LIMIT: Max 5 iterations to prevent infinite loop with malformed input
+        $maxIterations = 5;
+        $i = 0;
+        $decoded = rawurldecode($path);
+        while ($decoded !== $path && $i++ < $maxIterations) {
+            $path = $decoded;
+            $decoded = rawurldecode($path);
+        }
+
+        // Resolve path traversal by collapsing segments
+        // /foo/../.env → /.env, /a/b/../../.env → /.env
+        $segments = explode('/', $path);
+        $resolved = [];
+        foreach ($segments as $segment) {
+            if ($segment === '..') {
+                // Go up one directory (pop if possible)
+                if (!empty($resolved) && end($resolved) !== '') {
+                    array_pop($resolved);
+                }
+            } elseif ($segment !== '.' && $segment !== '') {
+                // Add valid segment (skip empty and single dot)
+                $resolved[] = $segment;
+            }
+        }
+        $path = '/' . implode('/', $resolved);
 
         // Collapse multiple slashes (//admin → /admin) to prevent bypass
         $path = (string) preg_replace('#/+#', '/', $path);
 
-        // Remove trailing slash (except for root /)
-        if ($path !== '/' && str_ends_with($path, '/')) {
-            $path = rtrim($path, '/');
-        }
+        // Normalize to lowercase for case-insensitive matching
+        $path = strtolower($path);
+
+        // DO NOT remove trailing slash - needed for directory matching
+        // Both /wp-admin and /wp-admin/ should be detected
 
         return $path;
     }
@@ -384,8 +460,14 @@ class HoneypotMiddleware
      */
     private function wildcardMatch(string $pattern, string $subject): bool
     {
-        $regex = '/^' . str_replace(['\*', '\?'], ['.*', '.'], preg_quote($pattern, '/')) . '$/i';
-        return (bool) preg_match($regex, $subject);
+        // Cache compiled regex patterns to avoid recompilation on every request
+        static $regexCache = [];
+
+        if (!isset($regexCache[$pattern])) {
+            $regexCache[$pattern] = '/^' . str_replace(['\*', '\?'], ['.*', '.'], preg_quote($pattern, '/')) . '$/i';
+        }
+
+        return preg_match($regexCache[$pattern], $subject) === 1;
     }
 
     /**
@@ -398,8 +480,8 @@ class HoneypotMiddleware
      */
     private function gatherIntelligence(array $server, string $path, string $method): array
     {
-        $ipRaw = $server['REMOTE_ADDR'] ?? 'unknown';
-        $ip = is_string($ipRaw) ? $ipRaw : 'unknown';
+        // Use resolved IP (handles proxies correctly)
+        $ip = IPUtils::extractClientIP($server, $this->trustedProxies);
 
         $userAgentRaw = $server['HTTP_USER_AGENT'] ?? '';
         $userAgent = is_string($userAgentRaw) ? $userAgentRaw : '';
@@ -476,7 +558,7 @@ class HoneypotMiddleware
             }
         }
 
-        // Path-based identification (case-insensitive)
+        // Path-based identification (case-insensitive for all paths)
         $pathLower = strtolower($path);
         if (str_contains($pathLower, 'wp-') || str_contains($pathLower, 'wordpress')) {
             return 'WordPress Scanner';
@@ -484,16 +566,16 @@ class HoneypotMiddleware
         if (str_contains($pathLower, '.sql') || str_contains($pathLower, 'backup')) {
             return 'Database Dumper';
         }
-        if (str_contains($path, 'api/') || str_contains($path, 'graphql')) {
+        if (str_contains($pathLower, 'api/') || str_contains($pathLower, 'graphql')) {
             return 'API Enumerator';
         }
-        if (str_contains($path, '.env') || str_contains($path, 'config')) {
+        if (str_contains($pathLower, '.env') || str_contains($pathLower, 'config')) {
             return 'Config Hunter';
         }
-        if (str_contains($path, '.git') || str_contains($path, '.svn')) {
+        if (str_contains($pathLower, '.git') || str_contains($pathLower, '.svn')) {
             return 'VCS Dumper';
         }
-        if (str_contains($path, '.aws') || str_contains($path, '.ssh')) {
+        if (str_contains($pathLower, '.aws') || str_contains($pathLower, '.ssh')) {
             return 'Cloud Credential Hunter';
         }
 
@@ -632,12 +714,12 @@ REDIS_PORT=6379
 
 # AWS Credentials (FAKE)
 AWS_ACCESS_KEY_ID=AKIAFAKEACCESSKEY12345
-AWS_SECRET_ACCESS_KEY=fake+aws+secret+key+do+not+use+honeypot
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 AWS_DEFAULT_REGION=us-east-1
 AWS_BUCKET=production-backups-fake
 
 # API Keys (FAKE)
-STRIPE_SECRET=sk_live_FAKE_stripe_key_honeypot_trap
+STRIPE_SECRET=fake_stripe_key_51H4a8KBhX9zP2mQ7rYnW3fA0sLd6eUi
 TWILIO_AUTH_TOKEN=FAKE_twilio_auth_token_useless
 SENDGRID_API_KEY=SG.FakeKey123456789.AbCdEfGhIjKlMnOp
 
@@ -645,7 +727,6 @@ SENDGRID_API_KEY=SG.FakeKey123456789.AbCdEfGhIjKlMnOp
 ADMIN_EMAIL=admin@production-internal.fake
 ADMIN_PASSWORD=Admin!P@ssw0rd123Fake
 
-# HONEYPOT WARNING: This file is fake. Your IP has been logged and banned.
 ENV;
     }
 
@@ -677,7 +758,7 @@ ENV;
 <body>
 <h1>PHP Version 7.4.33 (FAKE)</h1>
 <table>
-<tr><td class="e">System</td><td class="v">Linux honeypot-server 5.15.0-generic</td></tr>
+<tr><td class="e">System</td><td class="v">Linux prod-web-01 5.15.0-generic</td></tr>
 <tr><td class="e">Server API</td><td class="v">Apache 2.4.54 (Ubuntu)</td></tr>
 <tr><td class="e">Loaded Configuration File</td><td class="v">/etc/php/7.4/apache2/php.ini</td></tr>
 <tr><td class="e">register_globals</td><td class="v">On (INSECURE - FAKE)</td></tr>
@@ -686,8 +767,6 @@ ENV;
 <tr><td class="e">mysqli.default_user</td><td class="v">root</td></tr>
 <tr><td class="e">mysqli.default_pw</td><td class="v">FakeP@ssword123!</td></tr>
 </table>
-<hr>
-<p><strong>HONEYPOT WARNING:</strong> This is fake data. Your IP has been logged and banned for 7 days.</p>
 </body>
 </html>
 HTML;
@@ -731,8 +810,6 @@ HTML;
 
             <button type="submit" class="button">Log In</button>
         </form>
-        <hr>
-        <p style="color: red; font-weight: bold;">HONEYPOT: Your IP has been logged and banned for 7 days.</p>
     </div>
 </body>
 </html>
@@ -768,8 +845,6 @@ HTML;
 	email = deploy-bot@enterprise-internal.fake
 [credential]
 	helper = store
-
-# HONEYPOT: This is fake data. Your IP is banned.
 GIT;
     }
 
@@ -812,7 +887,6 @@ GIT;
                     ],
                 ],
             ],
-            '_honeypot_warning' => 'This is fake data. Your IP has been banned.',
         ];
 
         return json_encode($response, JSON_PRETTY_PRINT) ?: '{}';
@@ -870,7 +944,6 @@ GIT;
                     ],
                 ],
             ],
-            '_honeypot_warning' => 'All data is fake. You are banned.',
         ];
 
         return json_encode($response, JSON_PRETTY_PRINT) ?: '{}';
@@ -889,35 +962,35 @@ GIT;
             header('Content-Type: application/json');
         }
 
-        // Different fake data based on path
+        // Different fake data based on path - looks realistic
         if (str_contains($path, 'users')) {
             $response = [
                 'success' => true,
                 'data' => [
-                    ['id' => 1, 'email' => 'admin@fake.test', 'role' => 'admin', 'password_hash' => '$2y$10$FakeHashUseless123'],
-                    ['id' => 2, 'email' => 'user@fake.test', 'role' => 'user', 'api_token' => 'fake_token_12345'],
+                    ['id' => 1, 'email' => 'admin@company.com', 'role' => 'admin', 'password_hash' => '$2y$10$KV3JzZ8vL.Qn9YpX2wBqAeRhTm6sUyK1cDfGhJkLmNoPqRsTuVwX'],
+                    ['id' => 2, 'email' => 'user@company.com', 'role' => 'user', 'api_token' => 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'],
                 ],
-                '_honeypot' => 'Banned.',
+                'meta' => ['total' => 2, 'page' => 1],
             ];
         } elseif (str_contains($path, 'debug') || str_contains($path, 'internal')) {
             $response = [
                 'debug' => true,
                 'database' => [
-                    'host' => 'db.internal.cloud',
-                    'user' => 'root',
-                    'pass' => 'FakeDBP@ss123!',
+                    'host' => 'db-master.internal.cloud',
+                    'user' => 'app_user',
+                    'pass' => 'Pr0d#SecretDB!2024',
                 ],
                 'redis' => [
-                    'host' => 'redis.internal.cloud',
-                    'password' => 'R3d1sF@ke!',
+                    'host' => 'redis-cluster.internal.cloud',
+                    'password' => 'R3d1s#Cache!Key',
                 ],
-                '_honeypot' => 'Banned.',
+                'environment' => 'production',
             ];
         } else {
             $response = [
                 'error' => 'Unauthorized',
                 'message' => 'Valid API key required',
-                '_honeypot' => 'Banned.',
+                'code' => 401,
             ];
         }
 
@@ -937,13 +1010,10 @@ GIT;
             header('Content-Disposition: attachment; filename="backup_' . date('Y-m-d') . '.sql"');
         }
 
-        $fakeIPRaw = $this->intelligence['ip'] ?? '0.0.0.0';
-        $fakeIP = is_string($fakeIPRaw) ? $fakeIPRaw : '0.0.0.0';
-
         return <<<SQL
--- HONEYPOT DATABASE DUMP (FAKE DATA)
--- Your IP {$fakeIP} has been logged and banned for 7 days
 -- MySQL dump 10.19  Distrib 8.0.32
+-- Host: db-master.internal.cloud
+-- Database: production_app
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS=0;
@@ -966,8 +1036,8 @@ CREATE TABLE `users` (
 --
 
 INSERT INTO `users` VALUES
-(1, 'admin@honeypot.fake', '\$2y\$10\$FakeBcryptHashUseless123', 'FAKE_API_KEY_12345'),
-(2, 'dbadmin@honeypot.fake', '\$2y\$10\$AnotherFakeHashLOL456', 'FAKE_API_KEY_67890');
+(1, 'admin@company.com', '\$2y\$10\$KV3JzZ8vL.Qn9YpX2wBqAeRhTm6sUyK1cDfGhJkLmNoPqRsTuVwX', 'sk_api_7f8a9b2c3d4e5f6g'),
+(2, 'dev@company.com', '\$2y\$10\$Xm4NpL7kQ9rS2tUvWxYz0A1bC3dE5fG6hI8jK0lM2nO4pQ6rS8t', 'sk_api_1a2b3c4d5e6f7g8h');
 
 --
 -- Table structure for table `api_credentials`
@@ -980,11 +1050,10 @@ CREATE TABLE `api_credentials` (
 );
 
 INSERT INTO `api_credentials` VALUES
-('stripe', 'sk_live_FAKE_stripe_key_honeypot_trap', 'fake_stripe_secret'),
-('aws', 'AKIAFAKEAWSACCESSKEY12345', 'fake+aws+secret+key+honeypot');
+('stripe', 'fake_stripe_51H4a8KBhX9zP2mQ7rYnW3fA0', 'whsec_1a2b3c4d5e6f7g8h9i0j'),
+('aws', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
 
--- HONEYPOT: All data above is completely fake and useless.
--- Your IP has been permanently logged and banned.
+SET FOREIGN_KEY_CHECKS=1;
 SQL;
     }
 
@@ -1002,28 +1071,31 @@ SQL;
 
         return <<<CONFIG
 <?php
-// Production Configuration File (FAKE)
-// HONEYPOT: Your IP has been banned
+/**
+ * Production Configuration
+ * Last updated: 2024-01-15
+ */
 
 define('DB_HOST', 'db-master.internal.cloud');
-define('DB_USER', 'prod_admin');
-define('DB_PASS', 'P@ssw0rd!Fake123');
-define('DB_NAME', 'production_database');
+define('DB_USER', 'app_production');
+define('DB_PASS', 'Pr0d#SecretDB!2024@Secure');
+define('DB_NAME', 'production_app');
 
 define('REDIS_HOST', 'redis-cluster.internal.cloud');
-define('REDIS_PASS', 'R3d1s!FakeP@ss789');
+define('REDIS_PASS', 'R3d1s#C4che!Pr0d_Key');
 
-define('ADMIN_USER', 'admin');
-define('ADMIN_PASS', 'admin!fake@123');
+define('ADMIN_USER', 'sysadmin');
+define('ADMIN_PASS', 'Adm1n!Str0ng#Pass2024');
 
-define('API_SECRET', 'fake_api_secret_key_useless');
-define('JWT_SECRET', 'fake_jwt_secret_do_not_use');
+define('API_SECRET', 'fake_api_key_9f8e7d6c5b4a3210fedcba98');
+define('JWT_SECRET', 'jwt_s3cr3t_k3y_pr0duct10n_2024');
 
 // AWS Credentials
-define('AWS_KEY', 'AKIAFAKEACCESSKEY12345');
-define('AWS_SECRET', 'fake+aws+secret+key+honeypot');
+define('AWS_KEY', 'AKIAIOSFODNN7EXAMPLE');
+define('AWS_SECRET', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
 
-// HONEYPOT WARNING: All credentials are fake. You are banned.
+// Stripe
+define('STRIPE_SECRET', 'fake_stripe_key_51H4a8KBhX9zP2mQ7rYnW3fA0sLd6eUi');
 CONFIG;
     }
 
@@ -1039,24 +1111,24 @@ CONFIG;
             header('Content-Type: text/plain');
         }
 
-        $fakeIPRaw = $this->intelligence['ip'] ?? '0.0.0.0';
-        $fakeIP = is_string($fakeIPRaw) ? $fakeIPRaw : '0.0.0.0';
         $now = date('Y-m-d H:i:s');
+        $yesterday = date('Y-m-d H:i:s', strtotime('-1 day'));
+        $hourAgo = date('Y-m-d H:i:s', strtotime('-1 hour'));
 
         return <<<LOG
-[{$now}] INFO: Application started
-[{$now}] DEBUG: Database connected to db-master.internal.cloud:5432
-[{$now}] DEBUG: Redis connection established (password: redis_fake_pass_123)
-[{$now}] WARNING: API key validation disabled in dev mode (INSECURE)
-[{$now}] INFO: Admin user authenticated: admin@production.fake
-[{$now}] DEBUG: SQL Query: SELECT * FROM users WHERE role='admin'
-[{$now}] DEBUG: Loaded 5,247 users from database (FAKE)
-[{$now}] DEBUG: AWS S3 bucket: production-backups-fake
-[{$now}] DEBUG: S3 Access Key: AKIAFAKEACCESSKEY12345 (HONEYPOT)
-[{$now}] DEBUG: Stripe Secret Key: sk_live_FAKE_stripe_key
-[{$now}] ERROR: Rate limit exceeded for IP {$fakeIP}
-[{$now}] SECURITY: HONEYPOT TRIGGERED - IP {$fakeIP} BANNED FOR 7 DAYS
-[{$now}] INFO: All data above is FAKE. You wasted your time scanning us. Goodbye.
+[{$yesterday}] INFO: Application started - PID 12847
+[{$yesterday}] DEBUG: Database connected to db-master.internal.cloud:5432
+[{$yesterday}] DEBUG: Redis connection established (cluster mode)
+[{$yesterday}] INFO: Background jobs started (5 workers)
+[{$hourAgo}] DEBUG: SQL Query: SELECT * FROM users WHERE last_login > NOW() - INTERVAL '24 hours'
+[{$hourAgo}] DEBUG: Found 3,482 active users
+[{$hourAgo}] INFO: Cache warmup completed (hit ratio: 94.7%)
+[{$now}] DEBUG: AWS S3 sync: production-backups bucket
+[{$now}] DEBUG: S3 Access Key: AKIAIOSFODNN7EXAMPLE
+[{$now}] DEBUG: Stripe webhook received: invoice.paid
+[{$now}] INFO: Payment processed: $149.99 (customer: cus_L2b3K4m5N6o7P8q)
+[{$now}] DEBUG: Email sent to admin@company.com: Daily report
+[{$now}] INFO: Health check passed - all services operational
 LOG;
     }
 
@@ -1076,32 +1148,31 @@ LOG;
         if (str_contains($path, '.aws')) {
             return <<<AWS
 [default]
-aws_access_key_id = AKIAFAKEACCESSKEY12345
-aws_secret_access_key = fake+aws+secret+key+honeypot+trap+useless
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 region = us-east-1
 
 [production]
-aws_access_key_id = AKIAFAKEPRODUCTION67890
-aws_secret_access_key = another+fake+aws+key+nice+try+banned
+aws_access_key_id = AKIAI44QH8DHBEXAMPLE
+aws_secret_access_key = je7MtGbClwBF/2Zp9Utk/h3yCo8nvbEXAMPLEKEY
 region = eu-west-1
-
-# HONEYPOT: These are fake credentials. Your IP is banned.
+output = json
 AWS;
         }
 
         if (str_contains($path, '.ssh') || str_contains($path, 'id_rsa')) {
             return <<<SSH
 -----BEGIN OPENSSH PRIVATE KEY-----
-FAKE_SSH_KEY_HONEYPOT_THIS_IS_NOT_A_REAL_KEY_DO_NOT_USE
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdzc2gtcn
-NhAAAAAwEAAQAAAYEAFakeKeyDataHoneypotNotRealBannedNowGoodbye
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACBFKpHlIvR2p2Y2RBHxMGEL1ypGpXiTrH5YHk8m6WZvOQAAAJhJ8K3WSfCt
+1gAAAAtzc2gtZWQyNTUxOQAAACBFKpHlIvR2p2Y2RBHxMGEL1ypGpXiTrH5YHk8m6WZvOQ
+AAAEDmfR6qKMxpL1u3K4R4HyWRf2YKqwCbD9JFMW6vLRhg8UUqkeUi9HanZjZEEfEwYQvX
+KkaleMsflgeTybpZm84AAAAFZGVwbG95AQIDBAUGBwgJCg==
 -----END OPENSSH PRIVATE KEY-----
-
-# HONEYPOT: This is a fake SSH key. Your IP has been banned.
 SSH;
         }
 
-        return "Access Denied - Honeypot Trap";
+        return "Access Denied";
     }
 
     /**
@@ -1116,6 +1187,6 @@ SSH;
             header('Content-Type: text/plain');
         }
 
-        return "404 Not Found\n\n(Honeypot: Your IP has been logged and banned)";
+        return "404 Not Found";
     }
 }

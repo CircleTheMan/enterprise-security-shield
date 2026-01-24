@@ -16,13 +16,24 @@ use Senza1dio\SecurityShield\Contracts\StorageInterface;
  * - CI/CD pipelines
  * - Demos
  *
+ * LIMITATIONS (By Design):
+ * =========================
+ * - NO persistence across requests
+ * - NO concurrency simulation (race conditions not tested)
+ * - NO window drift (time-based expiration simplified)
+ * - NOT suitable for load testing or production
+ *
+ * TESTING SCOPE:
+ * - Logic verification (correct flow)
+ * - NOT performance or concurrency testing
+ *
  * DO NOT use in production - data will be lost on script termination.
  */
 class NullStorage implements StorageInterface
 {
     /** @var array<string, array{score: int, expires_at: int}> */
     private array $scores = [];
-    /** @var array<string, array{reason: string, expires_at: int}> */
+    /** @var array<string, array{ip: string, reason: string, banned_at: int, expires_at: int}> */
     private array $bans = [];
     /** @var array<string, array{verified: bool, metadata: array<string, mixed>, expires_at: int}> */
     private array $botCache = [];
@@ -30,6 +41,8 @@ class NullStorage implements StorageInterface
     private array $events = [];
     /** @var array<string, array{count: int, expires_at: int}> */
     private array $rateLimits = [];
+    /** @var array<string, array{value: mixed, expires_at: int}> Generic cache */
+    private array $cache = [];
 
     /**
      * {@inheritDoc}
@@ -179,11 +192,12 @@ class NullStorage implements StorageInterface
         ];
 
         // Keep last 1000 events per type (memory limit)
+        // Use array_slice instead of array_shift - O(1) vs O(n) reindexing
         if (count($typeEvents) > 1000) {
-            array_shift($typeEvents);
+            $typeEvents = array_slice($typeEvents, -1000, null, false);
         }
 
-        $this->events[$type] = array_values($typeEvents); // Reindex to int keys
+        $this->events[$type] = $typeEvents;
 
         return true;
     }
@@ -222,13 +236,14 @@ class NullStorage implements StorageInterface
     /**
      * {@inheritDoc}
      */
-    public function incrementRequestCount(string $ip, int $window): int
+    public function incrementRequestCount(string $ip, int $window, string $action = 'general'): int
     {
         $now = time();
+        $key = $ip . ':' . $action; // Separate counter per action
 
         // Initialize or get current rate limit data
-        if (!isset($this->rateLimits[$ip])) {
-            $this->rateLimits[$ip] = [
+        if (!isset($this->rateLimits[$key])) {
+            $this->rateLimits[$key] = [
                 'count' => 1,
                 'expires_at' => $now + $window,
             ];
@@ -236,8 +251,8 @@ class NullStorage implements StorageInterface
         }
 
         // Check if window expired - reset counter
-        if ($now > $this->rateLimits[$ip]['expires_at']) {
-            $this->rateLimits[$ip] = [
+        if ($now > $this->rateLimits[$key]['expires_at']) {
+            $this->rateLimits[$key] = [
                 'count' => 1,
                 'expires_at' => $now + $window,
             ];
@@ -245,26 +260,38 @@ class NullStorage implements StorageInterface
         }
 
         // Increment counter within window
-        $this->rateLimits[$ip]['count']++;
-        return $this->rateLimits[$ip]['count'];
+        $this->rateLimits[$key]['count']++;
+        return $this->rateLimits[$key]['count'];
     }
 
     /**
      * {@inheritDoc}
+     *
+     * NOTE: $window parameter not used in NullStorage
+     *
+     * REASON:
+     * - Expiration already set by incrementRequestCount()
+     * - NullStorage doesn't recalculate windows dynamically
+     * - Window enforcement happens at increment time, not read time
+     *
+     * This is CORRECT for in-memory testing storage.
+     * Race conditions and window drift are NOT simulated (intentional).
      */
-    public function getRequestCount(string $ip, int $window): int
+    public function getRequestCount(string $ip, int $window, string $action = 'general'): int
     {
-        if (!isset($this->rateLimits[$ip])) {
+        $key = $ip . ':' . $action; // Separate counter per action
+
+        if (!isset($this->rateLimits[$key])) {
             return 0;
         }
 
         // Check expiration
-        if (time() > $this->rateLimits[$ip]['expires_at']) {
-            unset($this->rateLimits[$ip]);
+        if (time() > $this->rateLimits[$key]['expires_at']) {
+            unset($this->rateLimits[$key]);
             return 0;
         }
 
-        return $this->rateLimits[$ip]['count'];
+        return $this->rateLimits[$key]['count'];
     }
 
     /**
@@ -277,6 +304,7 @@ class NullStorage implements StorageInterface
         $this->botCache = [];
         $this->events = [];
         $this->rateLimits = [];
+        $this->cache = [];
         return true;
     }
 
@@ -293,6 +321,37 @@ class NullStorage implements StorageInterface
             'bot_cache' => $this->botCache,
             'events' => $this->events,
             'rate_limits' => $this->rateLimits,
+            'cache' => $this->cache,
         ];
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function get(string $key): mixed
+    {
+        if (!isset($this->cache[$key])) {
+            return null;
+        }
+
+        // Check expiration
+        if (time() > $this->cache[$key]['expires_at']) {
+            unset($this->cache[$key]);
+            return null;
+        }
+
+        return $this->cache[$key]['value'];
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function set(string $key, mixed $value, int $ttl): bool
+    {
+        $this->cache[$key] = [
+            'value' => $value,
+            'expires_at' => time() + $ttl,
+        ];
+        return true;
     }
 }

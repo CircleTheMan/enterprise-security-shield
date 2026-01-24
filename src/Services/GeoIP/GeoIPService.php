@@ -3,6 +3,7 @@
 namespace Senza1dio\SecurityShield\Services\GeoIP;
 
 use Senza1dio\SecurityShield\Contracts\StorageInterface;
+use Senza1dio\SecurityShield\Utils\IPUtils;
 
 /**
  * GeoIP Service - Multi-Provider with Redis Caching
@@ -164,6 +165,13 @@ class GeoIPService
      */
     public function isCountry(string $ip, string $countryCode): bool
     {
+        // Validate ISO 3166-1 alpha-2 country code format
+        if (!preg_match('/^[A-Za-z]{2}$/', $countryCode)) {
+            throw new \InvalidArgumentException(
+                "Country code must be 2 letters (ISO 3166-1 alpha-2), got: {$countryCode}"
+            );
+        }
+
         return $this->getCountry($ip) === strtoupper($countryCode);
     }
 
@@ -221,138 +229,29 @@ class GeoIPService
     /**
      * Check if IP is private/reserved (RFC 1918, RFC 4193)
      *
+     * Delegates to IPUtils for centralized private IP detection.
+     *
      * @param string $ip
      * @return bool
      */
     private function isPrivateIP(string $ip): bool
     {
-        // IPv4 private ranges
-        $privateRanges = [
-            '10.0.0.0/8',
-            '172.16.0.0/12',
-            '192.168.0.0/16',
-            '127.0.0.0/8',
-            '169.254.0.0/16',
-        ];
-
-        foreach ($privateRanges as $range) {
-            if ($this->ipInCIDR($ip, $range)) {
-                return true;
-            }
-        }
-
-        // IPv6 private ranges
-        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-            return str_starts_with($ip, 'fe80:') || // Link-local
-                   str_starts_with($ip, 'fc00:') || // Unique local
-                   str_starts_with($ip, 'fd00:') || // Unique local
-                   $ip === '::1'; // Loopback
-        }
-
-        return false;
-    }
-
-    /**
-     * Check if IP is in CIDR range (IPv4 AND IPv6 supported)
-     *
-     * SUPPORTS:
-     * - IPv4: 192.168.1.0/24
-     * - IPv6: 2001:db8::/32
-     *
-     * @param string $ip
-     * @param string $cidr
-     * @return bool
-     */
-    private function ipInCIDR(string $ip, string $cidr): bool
-    {
-        if (!str_contains($cidr, '/')) {
-            return $ip === $cidr;
-        }
-
-        [$subnet, $mask] = explode('/', $cidr);
-        $mask = (int) $mask;
-
-        // Validate IP and subnet
-        $isIPv6 = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
-        $isSubnetIPv6 = filter_var($subnet, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
-
-        // IP and subnet must be same protocol
-        if ($isIPv6 !== $isSubnetIPv6) {
-            return false;
-        }
-
-        if ($isIPv6) {
-            // IPv6 CIDR matching
-            return $this->ipv6InCIDR($ip, $subnet, $mask);
-        } else {
-            // IPv4 CIDR matching (original logic)
-            $ipLong = ip2long($ip);
-            $subnetLong = ip2long($subnet);
-
-            if ($ipLong === false || $subnetLong === false) {
-                return false;
-            }
-
-            // Calculate subnet mask
-            $maskLong = -1 << (32 - $mask);
-
-            // Check if IP is in the network range
-            return ($ipLong & $maskLong) === ($subnetLong & $maskLong);
-        }
-    }
-
-    /**
-     * Check if IPv6 address is within IPv6 CIDR range
-     *
-     * @param string $ip IPv6 address
-     * @param string $subnet IPv6 subnet
-     * @param int $mask CIDR mask (0-128)
-     * @return bool True if IP is in range
-     */
-    private function ipv6InCIDR(string $ip, string $subnet, int $mask): bool
-    {
-        // Convert IPv6 to binary representation
-        $ipBin = inet_pton($ip);
-        $subnetBin = inet_pton($subnet);
-
-        if ($ipBin === false || $subnetBin === false) {
-            return false;
-        }
-
-        // Calculate number of bytes and bits to compare
-        $bytesToCompare = (int) floor($mask / 8);
-        $bitsToCompare = $mask % 8;
-
-        // Compare full bytes
-        for ($i = 0; $i < $bytesToCompare; $i++) {
-            if ($ipBin[$i] !== $subnetBin[$i]) {
-                return false;
-            }
-        }
-
-        // Compare remaining bits in partial byte
-        if ($bitsToCompare > 0 && $bytesToCompare < strlen($ipBin)) {
-            $ipByte = ord($ipBin[$bytesToCompare]);
-            $subnetByte = ord($subnetBin[$bytesToCompare]);
-            $maskByte = (0xFF << (8 - $bitsToCompare)) & 0xFF;
-
-            if (($ipByte & $maskByte) !== ($subnetByte & $maskByte)) {
-                return false;
-            }
-        }
-
-        return true;
+        return IPUtils::isPrivateIP($ip);
     }
 
     /**
      * Get cached GeoIP data
+     *
+     * NOTE: StorageInterface now includes get()/set() methods.
+     * The method_exists check is kept for backward compatibility with
+     * custom storage implementations that may not have these methods.
      *
      * @param string $key
      * @return array<string, mixed>|null
      */
     private function getCachedData(string $key): ?array
     {
-        // Use custom cache method if storage supports it
+        // StorageInterface includes get() - check kept for custom implementations
         if (method_exists($this->storage, 'get')) {
             /** @var mixed $data */
             $data = $this->storage->get($key);

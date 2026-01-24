@@ -2,7 +2,7 @@
 
 namespace Senza1dio\SecurityShield\Integrations\WooCommerce;
 
-use Senza1dio\SecurityShield\Middleware\WafMiddleware;
+use Senza1dio\SecurityShield\Middleware\SecurityMiddleware;
 use Senza1dio\SecurityShield\Config\SecurityConfig;
 use Senza1dio\SecurityShield\Contracts\StorageInterface;
 
@@ -31,40 +31,30 @@ use Senza1dio\SecurityShield\Contracts\StorageInterface;
  *
  * @package Senza1dio\SecurityShield\Integrations\WooCommerce
  */
-class WooCommerceSecurityMiddleware extends WafMiddleware
+class WooCommerceSecurityMiddleware extends SecurityMiddleware
 {
     /**
-     * WooCommerce-specific suspicious paths
+     * WooCommerce-specific TRULY suspicious paths (block immediately)
+     *
+     * These paths should NEVER be accessible by legitimate users.
+     * They indicate scanning, hacking attempts, or misconfiguration.
+     *
+     * NOTE: admin-post.php is NOT included because it's used for
+     * legitimate public actions (e.g., form submissions with action= parameter).
+     * It's protected by rate limiting instead of instant blocking.
      *
      * @var array<string>
      */
     private const WC_SUSPICIOUS_PATHS = [
-        // Admin paths (should be protected by WordPress auth)
-        '/wp-admin/admin-ajax.php',
-        '/wp-admin/admin-post.php',
-
-        // WooCommerce REST API
-        '/wp-json/wc/v1/',
-        '/wp-json/wc/v2/',
-        '/wp-json/wc/v3/',
-
-        // Payment gateway callbacks (if not properly secured)
-        '/wc-api/',
-        '/?wc-api=',
-
-        // Legacy endpoints
-        '/wc-ajax/',
-        '/?wc-ajax=',
+        // Config files (should NEVER be accessible)
+        '/wp-config.php',
+        '/wp-config-sample.php',
 
         // Database backup files (scanner target)
         '/wp-content/backup-db/',
         '/wp-content/backups/',
 
-        // Config files (should NEVER be accessible)
-        '/wp-config.php',
-        '/wp-config-sample.php',
-
-        // User enumeration
+        // User enumeration (scanner behavior)
         '/?author=',
         '/wp-json/wp/v2/users',
     ];
@@ -72,14 +62,18 @@ class WooCommerceSecurityMiddleware extends WafMiddleware
     /**
      * Rate limits for WooCommerce-specific actions
      *
-     * @var array<string, array{requests: int, window: int}>
+     * Format: 'action' => ['max_requests' => N, 'window' => seconds]
+     *
+     * NAMING: 'max_requests' (not 'requests') clarifies this is a LIMIT, not current count.
+     *
+     * @var array<string, array{max_requests: int, window: int}>
      */
     private const WC_RATE_LIMITS = [
-        'checkout' => ['requests' => 5, 'window' => 300],        // 5 checkouts per 5 minutes
-        'add_to_cart' => ['requests' => 30, 'window' => 60],     // 30 add-to-cart per minute
-        'coupon_check' => ['requests' => 10, 'window' => 300],   // 10 coupon checks per 5 minutes
-        'api_request' => ['requests' => 100, 'window' => 60],    // 100 API requests per minute
-        'payment_callback' => ['requests' => 10, 'window' => 60], // 10 payment callbacks per minute
+        'checkout' => ['max_requests' => 5, 'window' => 300],        // 5 checkouts per 5 minutes
+        'add_to_cart' => ['max_requests' => 30, 'window' => 60],     // 30 add-to-cart per minute
+        'coupon_check' => ['max_requests' => 10, 'window' => 300],   // 10 coupon checks per 5 minutes
+        'api_request' => ['max_requests' => 100, 'window' => 60],    // 100 API requests per minute
+        'payment_callback' => ['max_requests' => 10, 'window' => 60], // 10 payment callbacks per minute
     ];
 
     /**
@@ -95,7 +89,7 @@ class WooCommerceSecurityMiddleware extends WafMiddleware
      */
     public function handle(array $server, array $get = [], array $post = []): bool
     {
-        // Run standard WAF checks first (includes whitelist check)
+        // Run standard security checks first (includes whitelist check)
         // If IP is whitelisted, parent::handle() returns true and WooCommerce checks are skipped
         $allowed = parent::handle($server, $get, $post);
 
@@ -103,8 +97,10 @@ class WooCommerceSecurityMiddleware extends WafMiddleware
             return false;
         }
 
-        // Get IP for WooCommerce-specific checks
-        $ip = $server['REMOTE_ADDR'] ?? '0.0.0.0';
+        // Get REAL client IP from parent (already resolved proxy-aware)
+        // CRITICAL: Use parent's cached IP to ensure consistency
+        // across early-ban, scoring, rate limiting, and WooCommerce checks
+        $ip = $this->getClientIp();
 
         // CRITICAL: If IP is whitelisted, skip WooCommerce-specific checks
         // This prevents site owners from being banned when accessing legitimate admin paths
@@ -206,15 +202,15 @@ class WooCommerceSecurityMiddleware extends WafMiddleware
             return true;
         }
 
-        // Check rate limit
-        $count = $this->storage->incrementRequestCount($ip, $limit['window']);
+        // Check rate limit with action-specific counter
+        $count = $this->storage->incrementRequestCount($ip, $limit['window'], $action);
 
-        if ($count > $limit['requests']) {
+        if ($count > $limit['max_requests']) {
             // Log rate limit violation
             $this->storage->logSecurityEvent('woocommerce_rate_limit', $ip, [
                 'action' => $action,
                 'count' => $count,
-                'limit' => $limit['requests'],
+                'limit' => $limit['max_requests'],
                 'window' => $limit['window'],
             ]);
 
@@ -236,28 +232,33 @@ class WooCommerceSecurityMiddleware extends WafMiddleware
      */
     private function detectWooCommerceAction(string $uri, string $method): ?string
     {
+        // Normalize URI: decode URL encoding, lowercase, remove special chars
+        // This prevents bypass via /ChEcKoUt, /checkout%2f, /checkout;foo=bar
+        $uriNormalized = strtolower(rawurldecode($uri));
+        $uriNormalized = preg_replace('#[^a-z0-9/_\-=]#', '', $uriNormalized) ?? $uriNormalized;
+
         // Checkout
-        if (stripos($uri, '/checkout') !== false && $method === 'POST') {
+        if (str_contains($uriNormalized, '/checkout') && $method === 'POST') {
             return 'checkout';
         }
 
         // Add to cart
-        if (stripos($uri, 'add-to-cart') !== false || stripos($uri, 'wc-ajax=add_to_cart') !== false) {
+        if (str_contains($uriNormalized, 'add-to-cart') || str_contains($uriNormalized, 'wc-ajax=add_to_cart')) {
             return 'add_to_cart';
         }
 
         // Coupon check
-        if (stripos($uri, 'apply_coupon') !== false || stripos($uri, 'remove_coupon') !== false) {
+        if (str_contains($uriNormalized, 'apply_coupon') || str_contains($uriNormalized, 'remove_coupon')) {
             return 'coupon_check';
         }
 
         // WooCommerce REST API
-        if (stripos($uri, '/wp-json/wc/') !== false) {
+        if (str_contains($uriNormalized, '/wp-json/wc/')) {
             return 'api_request';
         }
 
         // Payment gateway callback
-        if (stripos($uri, 'wc-api') !== false) {
+        if (str_contains($uriNormalized, 'wc-api')) {
             return 'payment_callback';
         }
 

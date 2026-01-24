@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Senza1dio\SecurityShield\Services;
 
+use Senza1dio\SecurityShield\Utils\IPUtils;
+use Senza1dio\SecurityShield\Services\FrameworkDetector;
+
 /**
  * Threat Pattern Detection - Static Pattern Matching
  *
@@ -685,6 +688,18 @@ class ThreatPatterns
      */
     public static function isCMSPath(string $path): bool
     {
+        // IMPORTANT: Framework detection bypass
+        // If FrameworkDetector identifies path as legitimate for current framework,
+        // we skip CMS honeypot detection to prevent false positives.
+        //
+        // LIMITATION: If FrameworkDetector fails or misdetects, legitimate paths
+        // could trigger honeypot. This is a trade-off for security over availability.
+        //
+        // RECOMMENDATION: Always whitelist admin IPs for CMS sites.
+        if (FrameworkDetector::isLegitimateFrameworkPath($path)) {
+            return false; // Legitimate framework path - not a honeypot
+        }
+
         return self::matchesPaths($path, self::CMS_PATHS);
     }
 
@@ -737,9 +752,17 @@ class ThreatPatterns
     {
         $pathLower = strtolower($path);
 
-        foreach ($patterns as $pattern) {
-            $patternLower = strtolower($pattern);
+        // Pre-compute lowercase patterns outside loop for performance
+        static $patternCache = [];
+        $cacheKey = md5(implode('|', $patterns));
 
+        if (!isset($patternCache[$cacheKey])) {
+            $patternCache[$cacheKey] = array_map('strtolower', $patterns);
+        }
+
+        $lowercasePatterns = $patternCache[$cacheKey];
+
+        foreach ($lowercasePatterns as $patternLower) {
             // Exact match
             if ($pathLower === $patternLower) {
                 return true;
@@ -750,10 +773,25 @@ class ThreatPatterns
                 return true;
             }
 
-            // Contains (for partial matches like /.env in path)
-            // WARNING: Aggressive, can cause false positives
-            if (str_contains($pathLower, $patternLower)) {
-                return true;
+            // Segment match: Pattern must match a path segment boundary
+            // This prevents /api/v1/user/.env/avatar.png from matching /.env
+            // But allows /.env and /.env.local to match
+            if (str_contains($patternLower, '.')) {
+                // For file patterns like /.env, only match at start or after /
+                $position = strpos($pathLower, $patternLower);
+                if ($position !== false) {
+                    // Must be at start or preceded by /
+                    if ($position === 0 || $pathLower[$position - 1] === '/') {
+                        // Must be at end or followed by / or end of string
+                        $afterPattern = $position + strlen($patternLower);
+                        if ($afterPattern >= strlen($pathLower) ||
+                            $pathLower[$afterPattern] === '/' ||
+                            $pathLower[$afterPattern] === '.' ||
+                            $pathLower[$afterPattern] === '?') {
+                            return true;
+                        }
+                    }
+                }
             }
         }
 
@@ -942,96 +980,17 @@ class ThreatPatterns
     }
 
     /**
-     * Check if IP is within CIDR range (IPv4 AND IPv6 supported)
+     * Check if IP is within CIDR range
      *
-     * SUPPORTS:
-     * - IPv4: 192.168.1.0/24
-     * - IPv6: 2001:db8::/32
+     * Delegates to IPUtils for centralized CIDR matching.
      *
      * @param string $ip IP address to check
-     * @param string $cidr CIDR notation (e.g., '192.168.1.0/24' or '2001:db8::/32')
+     * @param string $cidr CIDR notation (e.g., '192.168.1.0/24')
      * @return bool True if IP is in range
      */
     private static function ipInCIDR(string $ip, string $cidr): bool
     {
-        // Parse CIDR notation
-        if (!str_contains($cidr, '/')) {
-            return false;
-        }
-
-        [$subnet, $mask] = explode('/', $cidr);
-        $mask = (int) $mask;
-
-        // Validate IP and subnet
-        $isIPv6 = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
-        $isSubnetIPv6 = filter_var($subnet, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
-
-        // IP and subnet must be same protocol
-        if ($isIPv6 !== $isSubnetIPv6) {
-            return false;
-        }
-
-        if ($isIPv6) {
-            // IPv6 CIDR matching
-            return self::ipv6InCIDR($ip, $subnet, $mask);
-        } else {
-            // IPv4 CIDR matching (original logic)
-            $ipLong = ip2long($ip);
-            $subnetLong = ip2long($subnet);
-
-            if ($ipLong === false || $subnetLong === false) {
-                return false;
-            }
-
-            // Calculate subnet mask
-            $maskLong = -1 << (32 - $mask);
-
-            // Check if IP is in the network range
-            return ($ipLong & $maskLong) === ($subnetLong & $maskLong);
-        }
-    }
-
-    /**
-     * Check if IPv6 address is within IPv6 CIDR range
-     *
-     * @param string $ip IPv6 address
-     * @param string $subnet IPv6 subnet
-     * @param int $mask CIDR mask (0-128)
-     * @return bool True if IP is in range
-     */
-    private static function ipv6InCIDR(string $ip, string $subnet, int $mask): bool
-    {
-        // Convert IPv6 to binary representation
-        $ipBin = inet_pton($ip);
-        $subnetBin = inet_pton($subnet);
-
-        if ($ipBin === false || $subnetBin === false) {
-            return false;
-        }
-
-        // Calculate number of bytes and bits to compare
-        $bytesToCompare = (int) floor($mask / 8);
-        $bitsToCompare = $mask % 8;
-
-        // Compare full bytes
-        for ($i = 0; $i < $bytesToCompare; $i++) {
-            if ($ipBin[$i] !== $subnetBin[$i]) {
-                return false;
-            }
-        }
-
-        // Compare remaining bits in partial byte
-        if ($bitsToCompare > 0 && $bytesToCompare < strlen($ipBin)) {
-            $ipByte = ord($ipBin[$bytesToCompare]);
-            $subnetByte = ord($subnetBin[$bytesToCompare]);
-            $maskByte = (0xFF << (8 - $bitsToCompare)) & 0xFF;
-
-            if (($ipByte & $maskByte) !== ($subnetByte & $maskByte)) {
-                return false;
-            }
-        }
-
-        return true;
+        return IPUtils::isInCIDR($ip, $cidr);
     }
 
     // ============================================================================

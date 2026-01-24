@@ -9,40 +9,31 @@ use Senza1dio\SecurityShield\Contracts\StorageInterface;
 /**
  * Database Storage Backend - Dual-Write Architecture
  *
+ * Framework-agnostic storage backend with dual-write to database and cache.
+ *
  * ARCHITECTURE:
  * - Redis: L1 cache (sub-millisecond reads, hot data, volatile)
- * - PostgreSQL: Persistent storage (survives restarts, compliance, analytics)
+ * - PostgreSQL/MySQL: Persistent storage (survives restarts, compliance, analytics)
  *
  * DUAL-WRITE PATTERN:
- * - Writes go to BOTH Redis (cache) AND PostgreSQL (persistence)
+ * - Writes go to BOTH Redis (cache) AND Database (persistence)
  * - Reads prioritize Redis (fast path), fallback to DB (cold start)
  * - Ban checks use Redis ONLY (performance-critical, early exit)
  *
- * PERFORMANCE CHARACTERISTICS:
- * - Ban check (cached): <1ms (Redis only, no DB query)
- * - Ban check (cold start): ~5ms (DB query + Redis cache write)
- * - Score increment: ~2ms (Redis + async DB write)
- * - Security event log: ~1ms (Redis list + async DB insert)
+ * PERFORMANCE:
+ * - Ban check (cached): <1ms
+ * - Ban check (cold start): ~5ms
+ * - Score increment: ~2ms
+ * - Security event log: ~1ms
  *
  * REQUIREMENTS:
  * - PHP 8.0+ with PDO extension
- * - PostgreSQL 9.5+ (JSONB support)
- * - Redis 5.0+ (optional but recommended for performance)
- * - Database schema: database/schema.sql
- *
- * USAGE:
- * ```php
- * $pdo = new PDO('pgsql:host=localhost;dbname=security_db', 'user', 'password');
- * $redis = new Redis();
- * $redis->connect('127.0.0.1', 6379);
- *
- * $storage = new DatabaseStorage($pdo, $redis);
- * $config->setStorage($storage);
- * ```
+ * - PostgreSQL 9.5+ or MySQL 5.7+
+ * - Redis 5.0+ (optional but recommended)
  *
  * @package Senza1dio\SecurityShield\Storage
- * @version 1.1.0
- * @author Enterprise Security Team
+ * @version 2.0.0
+ * @author Senza1dio Security Team
  * @license MIT
  */
 class DatabaseStorage implements StorageInterface
@@ -231,7 +222,33 @@ LUA;
     /**
      * {@inheritDoc}
      *
-     * Ban check with database fallback (cold cache scenario)
+     * DUAL-STORAGE BAN CHECK:
+     * =======================
+     * 1. Fast path: Redis cache check (<1ms)
+     * 2. Slow path: PostgreSQL fallback (1-5ms cold cache)
+     *
+     * FAIL-OPEN BEHAVIOR:
+     * ===================
+     * Returns false (not banned) if BOTH Redis AND PostgreSQL fail.
+     *
+     * WHY DUAL-STORAGE IMPROVES RELIABILITY:
+     * - Redis down → PostgreSQL fallback (still secure)
+     * - PostgreSQL down → Redis continues (still fast)
+     * - BOTH down → Fail-open (prioritize availability)
+     *
+     * FAILURE SCENARIOS:
+     * - Redis only down: Uses DB (slightly slower, still secure)
+     * - DB only down: Uses Redis cache (fast, mostly secure)
+     * - Both down: FAIL-OPEN (attackers bypass bans, site stays online)
+     *
+     * HIGH AVAILABILITY PROBABILITY:
+     * - Redis uptime: 99.9% (Sentinel/Cluster)
+     * - PostgreSQL uptime: 99.95% (Replication)
+     * - BOTH down: 0.0005% = 4 minutes/year
+     *
+     * FAIL-CLOSED ALTERNATIVE:
+     * For critical security apps, catch exception at WafMiddleware level
+     * and return 503 Service Unavailable if storage completely fails.
      */
     public function isBanned(string $ip): bool
     {
@@ -280,7 +297,9 @@ LUA;
 
             return $banned;
         } catch (\PDOException $e) {
-            // Graceful degradation - fail-open (assume not banned)
+            // FAIL-OPEN: Both Redis and DB failed
+            // Probability: ~4 minutes/year with proper HA setup
+            // Alternative: Return true for fail-closed (block all traffic)
             return false;
         }
     }
@@ -528,9 +547,56 @@ LUA;
      * {@inheritDoc}
      *
      * DUAL-WRITE: Redis list (fast) + PostgreSQL table (compliance)
+     *
+     * DOS PROTECTION:
+     * ===============
+     * Event deduplication prevents log flooding attacks.
+     *
+     * ATTACK SCENARIO:
+     * - Attacker sends 1M requests → 1M identical log entries
+     * - PostgreSQL INSERT overwhelmed (10k/s limit)
+     * - Table size grows to GB → query slowdown
+     * - Disk I/O saturation
+     *
+     * DEFENSE:
+     * - Deduplicate via Redis (type + IP + data hash)
+     * - Same event logged max 1x per 60 seconds
+     * - Reduces 1M events → 1 event per minute
+     * - Database protected, compliance maintained
      */
     public function logSecurityEvent(string $type, string $ip, array $data): bool
     {
+        // Deduplication with time bucket: Skip if same event logged in current minute
+        if ($this->redis) {
+            $bucket = intdiv(time(), 60); // 1-minute time bucket
+            // Sort data keys for consistent hashing regardless of array key order
+            $sortedData = $data;
+            ksort($sortedData);
+
+            // Safely encode data - fallback to simple hash if JSON encoding fails
+            try {
+                $dataJson = json_encode($sortedData, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                // Fallback: use simple type:ip:bucket hash without data
+                $dataJson = '';
+            }
+
+            $dedupHash = md5($type . ':' . $ip . ':' . $bucket . ':' . $dataJson);
+            $dedupKey = $this->keyPrefix . 'event_dedup:' . $dedupHash;
+
+            try {
+                // Check if event already logged recently
+                if ($this->redis->exists($dedupKey)) {
+                    return true; // Already logged - skip duplicate
+                }
+
+                // Mark as logged for 300 seconds (5 minutes) to prevent log inflation
+                $this->redis->setex($dedupKey, 300, '1');
+            } catch (\RedisException $e) {
+                // Dedup failed - log anyway (better than losing events)
+            }
+        }
+
         try {
             // Determine severity from event type
             $severity = match ($type) {
@@ -649,39 +715,56 @@ LUA;
      * {@inheritDoc}
      *
      * DUAL-WRITE: Redis atomic + PostgreSQL update
+     *
+     * WINDOW LOGIC:
+     * - If window expired (expires_at < NOW), reset count to 1 and start new window
+     * - If window still valid, increment count
+     * - This ensures proper rate limiting within time windows
      */
-    public function incrementRequestCount(string $ip, int $window): int
+    public function incrementRequestCount(string $ip, int $window, string $action = 'general'): int
     {
         $expiresAt = date('Y-m-d H:i:s', time() + $window);
 
         try {
-            // PostgreSQL increment (source of truth)
+            // PostgreSQL increment with proper window expiration handling
+            // If window expired, reset count to 1; otherwise increment
             $stmt = $this->pdo->prepare('
-                INSERT INTO request_counts (ip, count, window_start, expires_at)
-                VALUES (:ip, 1, NOW(), :expires_at)
-                ON CONFLICT (ip) DO UPDATE
-                SET count = request_counts.count + 1,
-                    expires_at = :expires_at
+                INSERT INTO request_counts (ip, request_type, count, window_start, expires_at)
+                VALUES (:ip, :action, 1, NOW(), :expires_at)
+                ON CONFLICT (ip, request_type) DO UPDATE
+                SET count = CASE
+                    WHEN request_counts.expires_at < NOW() THEN 1
+                    ELSE request_counts.count + 1
+                END,
+                window_start = CASE
+                    WHEN request_counts.expires_at < NOW() THEN NOW()
+                    ELSE request_counts.window_start
+                END,
+                expires_at = CASE
+                    WHEN request_counts.expires_at < NOW() THEN :expires_at
+                    ELSE request_counts.expires_at
+                END
                 RETURNING count
             ');
             $stmt->execute([
                 ':ip' => $ip,
+                ':action' => $action,
                 ':expires_at' => $expiresAt,
             ]);
             $result = $stmt->fetch(\PDO::FETCH_ASSOC);
             $count = $result ? (int) $result['count'] : 1;
 
-            // Sync to Redis
+            // Sync to Redis with action-specific key
             if ($this->redis) {
-                $key = $this->keyPrefix . 'rate_limit:' . $ip;
+                $key = $this->keyPrefix . 'rate_limit:' . $action . ':' . $ip;
                 $this->redis->setex($key, $window, (string) $count);
             }
 
             return $count;
         } catch (\PDOException $e) {
-            // Fallback: Redis-only increment
+            // Fallback: Redis-only increment with action-specific key
             if ($this->redis) {
-                $key = $this->keyPrefix . 'rate_limit:' . $ip;
+                $key = $this->keyPrefix . 'rate_limit:' . $action . ':' . $ip;
                 $lua = <<<'LUA'
 local key = KEYS[1]
 local window = tonumber(ARGV[1])
@@ -703,12 +786,12 @@ LUA;
      *
      * READ PATH: Redis (fast) → PostgreSQL (fallback)
      */
-    public function getRequestCount(string $ip, int $window): int
+    public function getRequestCount(string $ip, int $window, string $action = 'general'): int
     {
-        // Fast path: Redis cache
+        // Fast path: Redis cache with action-specific key
         if ($this->redis) {
             try {
-                $key = $this->keyPrefix . 'rate_limit:' . $ip;
+                $key = $this->keyPrefix . 'rate_limit:' . $action . ':' . $ip;
                 $count = $this->redis->get($key);
                 if ($count !== false && is_numeric($count)) {
                     return (int) $count;
@@ -718,21 +801,24 @@ LUA;
             }
         }
 
-        // Slow path: PostgreSQL
+        // Slow path: PostgreSQL with action filter
         try {
             $stmt = $this->pdo->prepare('
                 SELECT count FROM request_counts
-                WHERE ip = :ip AND expires_at > NOW()
+                WHERE ip = :ip AND request_type = :action AND expires_at > NOW()
             ');
-            $stmt->execute([':ip' => $ip]);
+            $stmt->execute([
+                ':ip' => $ip,
+                ':action' => $action,
+            ]);
             $result = $stmt->fetch(\PDO::FETCH_ASSOC);
 
             if ($result) {
                 $count = (int) $result['count'];
 
-                // Warm Redis cache
+                // Warm Redis cache with correct action-specific key
                 if ($this->redis) {
-                    $key = $this->keyPrefix . 'rate_limit:' . $ip;
+                    $key = $this->keyPrefix . 'rate_limit:' . $action . ':' . $ip;
                     $this->redis->setex($key, $window, (string) $count);
                 }
 
@@ -757,27 +843,51 @@ LUA;
             // Clear PostgreSQL tables
             $this->pdo->exec('TRUNCATE TABLE ip_bans, threat_scores, security_events, request_counts, bot_verifications');
 
-            // Clear Redis keys
+            // Clear Redis keys with safety limits
             if ($this->redis) {
                 $pattern = $this->keyPrefix . '*';
                 $cursor = null;
                 $deletedCount = 0;
+                $iterations = 0;
+                $maxIterations = 10000; // Max 10M keys (10k iterations × 1k count)
+                $startTime = microtime(true);
+                $timeout = 30.0; // 30 seconds max for clear operation
 
                 do {
-                    $result = $this->redis->scan($cursor, $pattern, 1000);
-                    if ($result === false) {
+                    try {
+                        $result = $this->redis->scan($cursor, $pattern, 1000);
+                        if ($result === false) {
+                            break;
+                        }
+
+                        if (is_array($result) && count($result) >= 2) {
+                            $cursor = $result[0];
+                            /** @var list<string> $keys */
+                            $keys = $result[1];
+                            if (!empty($keys)) {
+                                $deleted = $this->redis->del($keys);
+                                $deletedCount += is_int($deleted) ? $deleted : 0;
+                            }
+                        }
+
+                        $iterations++;
+
+                        // Safety: Prevent infinite loop
+                        if ($iterations >= $maxIterations) {
+                            error_log("DatabaseStorage::clear() exceeded max iterations ({$maxIterations})");
+                            break;
+                        }
+
+                        // Safety: Prevent timeout
+                        if ((microtime(true) - $startTime) > $timeout) {
+                            error_log("DatabaseStorage::clear() timeout exceeded ({$timeout}s)");
+                            break;
+                        }
+                    } catch (\RedisException $e) {
+                        error_log("DatabaseStorage::clear() Redis SCAN error: " . $e->getMessage());
                         break;
                     }
-
-                    if (is_array($result) && count($result) >= 2) {
-                        $cursor = $result[0];
-                        $keys = $result[1];
-                        if (is_array($keys) && !empty($keys)) {
-                            $deleted = $this->redis->del($keys);
-                            $deletedCount += is_int($deleted) ? $deleted : 0;
-                        }
-                    }
-                } while ($cursor > 0);
+                } while ((int) $cursor > 0);
             }
 
             return true;
@@ -817,12 +927,9 @@ LUA;
     }
 
     /**
-     * Generic cache GET (for GeoIP, metrics, etc.)
-     *
-     * @param string $key Cache key
-     * @return mixed|null Cached value or null
+     * {@inheritDoc}
      */
-    public function get(string $key)
+    public function get(string $key): mixed
     {
         if ($this->redis) {
             try {
@@ -842,14 +949,9 @@ LUA;
     }
 
     /**
-     * Generic cache SET (for GeoIP, metrics, etc.)
-     *
-     * @param string $key Cache key
-     * @param mixed $value Value to cache
-     * @param int $ttl TTL in seconds
-     * @return bool Success
+     * {@inheritDoc}
      */
-    public function set(string $key, $value, int $ttl): bool
+    public function set(string $key, mixed $value, int $ttl): bool
     {
         if ($this->redis) {
             try {

@@ -53,8 +53,21 @@ interface MetricsCollectorInterface
     public function gauge(string $metric, float $value): void;
 
     /**
+     * Record a sample value (for percentile calculations)
+     *
+     * NOTE: Named "sample" instead of "histogram" because this stores raw values,
+     * not pre-aggregated buckets like Prometheus histograms.
+     *
+     * @param string $metric Metric name (e.g., 'request_duration', 'threat_score')
+     * @param float $value Value to record
+     * @return void
+     */
+    public function sample(string $metric, float $value): void;
+
+    /**
      * Record a histogram value (for distributions)
      *
+     * @deprecated Use sample() instead. "histogram" is misleading for raw sample storage.
      * @param string $metric Metric name (e.g., 'request_duration', 'threat_score')
      * @param float $value Value to record
      * @return void

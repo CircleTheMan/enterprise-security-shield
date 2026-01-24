@@ -10,17 +10,47 @@ use Senza1dio\SecurityShield\Contracts\LoggerInterface;
 /**
  * Security Configuration - Fluent Builder API
  *
- * Zero-config defaults for instant protection:
+ * Framework-agnostic configuration for the Security Shield.
+ *
+ * ZERO-CONFIG DEFAULTS:
  * - Score threshold: 50 points (auto-ban)
  * - Ban duration: 24 hours
  * - Tracking window: 1 hour
  * - Honeypot: enabled
  * - Bot verification: enabled with DNS
  *
- * Enterprise customization available via fluent API
+ * USAGE:
+ * ```php
+ * $config = (new SecurityConfig())
+ *     ->setScoreThreshold(50)
+ *     ->setBanDuration(86400)
+ *     ->setRateLimitMax(100)
+ *     ->setRateLimitWindow(60)
+ *     ->setStorage($redisStorage)
+ *     ->setLogger($logger);
+ * ```
+ *
+ * @package Senza1dio\SecurityShield\Config
  */
 class SecurityConfig
 {
+    /**
+     * Factory method to create a new SecurityConfig instance
+     *
+     * Fluent API alternative to constructor for chaining:
+     * ```php
+     * $config = SecurityConfig::create()
+     *     ->setScoreThreshold(50)
+     *     ->setBanDuration(86400);
+     * ```
+     *
+     * @return self
+     */
+    public static function create(): self
+    {
+        return new self();
+    }
+
     /** @var int Threat score threshold for auto-ban (default: 50) */
     private int $scoreThreshold = 50;
 
@@ -69,8 +99,15 @@ class SecurityConfig
     /** @var string Environment (production, staging, development) */
     private string $environment = 'production';
 
-    /** @var int Rate limit requests per minute (default: 100) */
-    private int $rateLimitPerMinute = 100;
+    /**
+     * Max requests allowed per rate limit window
+     *
+     * NAMING: "rateLimitMax" (not "perMinute") to avoid confusion
+     * when window != 60 seconds
+     *
+     * @var int Max requests per window (default: 100)
+     */
+    private int $rateLimitMax = 100;
 
     /** @var int Rate limit window in seconds (default: 60) */
     private int $rateLimitWindow = 60;
@@ -89,6 +126,25 @@ class SecurityConfig
 
     /** @var int GeoIP ban duration in seconds (default: 30 days) */
     private int $geoipBanDuration = 2592000;
+
+    /**
+     * Fail-closed mode: Ban users on storage failure (default: false = fail-open)
+     *
+     * FAIL-OPEN (false, default):
+     * - Storage down → Allow traffic (high availability)
+     * - PRO: Site stays online during Redis/DB outage
+     * - CON: Attackers bypass bans during outage
+     * - USE CASE: E-commerce, public sites
+     *
+     * FAIL-CLOSED (true):
+     * - Storage down → Block traffic (high security)
+     * - PRO: Security maintained during outage
+     * - CON: Legitimate users blocked
+     * - USE CASE: Banking, government, high-security
+     *
+     * @var bool Enable fail-closed mode (block on storage failure)
+     */
+    private bool $failClosed = false;
 
     /**
      * Set threat score threshold for auto-ban
@@ -374,26 +430,38 @@ class SecurityConfig
     }
 
     /**
-     * Set rate limit (requests per minute)
+     * Set rate limit maximum requests per window
      *
-     * Controls how many requests a single IP can make per minute.
+     * Controls how many requests a single IP can make within the rate limit window.
      * Exceeding this limit adds threat score points.
      *
      * RECOMMENDED VALUES:
-     * - API endpoints: 60-100 requests/minute
-     * - Web applications: 100-200 requests/minute
-     * - High-traffic sites: 200-500 requests/minute
+     * - API endpoints: 60-100 requests/window
+     * - Web applications: 100-200 requests/window
+     * - High-traffic sites: 200-500 requests/window
      *
-     * @param int $limit Requests per minute (1-1000)
+     * @param int $limit Maximum requests per window (1-10000)
+     * @return self
+     */
+    public function setRateLimitMax(int $limit): self
+    {
+        if ($limit < 1 || $limit > 10000) {
+            throw new \InvalidArgumentException('Rate limit must be between 1 and 10000 requests per window');
+        }
+        $this->rateLimitMax = $limit;
+        return $this;
+    }
+
+    /**
+     * Set rate limit (requests per minute) - Alias for setRateLimitMax
+     *
+     * @deprecated Use setRateLimitMax() instead (clearer naming)
+     * @param int $limit Requests per window (1-10000)
      * @return self
      */
     public function setRateLimitPerMinute(int $limit): self
     {
-        if ($limit < 1 || $limit > 1000) {
-            throw new \InvalidArgumentException('Rate limit must be between 1 and 1000 requests/minute');
-        }
-        $this->rateLimitPerMinute = $limit;
-        return $this;
+        return $this->setRateLimitMax($limit);
     }
 
     /**
@@ -530,12 +598,6 @@ class SecurityConfig
         if (isset($config['rate_limit_window']) && is_int($config['rate_limit_window'])) {
             $instance->setRateLimitWindow($config['rate_limit_window']);
         }
-        if (isset($config['sql_injection_detection']) && is_bool($config['sql_injection_detection'])) {
-            $instance->enableSQLInjectionDetection($config['sql_injection_detection']);
-        }
-        if (isset($config['xss_detection']) && is_bool($config['xss_detection'])) {
-            $instance->enableXSSDetection($config['xss_detection']);
-        }
         if (isset($config['trusted_proxies']) && is_array($config['trusted_proxies'])) {
             $instance->setTrustedProxies($config['trusted_proxies']);
         }
@@ -587,7 +649,16 @@ class SecurityConfig
     public function isAlertsEnabled(): bool { return $this->alertsEnabled; }
     public function getAlertWebhook(): ?string { return $this->alertWebhook; }
     public function getEnvironment(): string { return $this->environment; }
-    public function getRateLimitPerMinute(): int { return $this->rateLimitPerMinute; }
+    /**
+     * Get max requests per rate limit window
+     *
+     * @deprecated Use getRateLimitMax() instead (clearer naming)
+     * @return int Max requests allowed
+     */
+    public function getRateLimitPerMinute(): int { return $this->rateLimitMax; }
+
+    /** @return int Max requests per window */
+    public function getRateLimitMax(): int { return $this->rateLimitMax; }
     public function getRateLimitWindow(): int { return $this->rateLimitWindow; }
     /** @return array<int, string> */
     public function getTrustedProxies(): array { return $this->trustedProxies; }
@@ -596,6 +667,7 @@ class SecurityConfig
     public function isGeoIPEnabled(): bool { return $this->geoipEnabled; }
     public function getGeoIPCacheTTL(): int { return $this->geoipCacheTTL; }
     public function getGeoIPBanDuration(): int { return $this->geoipBanDuration; }
+    public function isFailClosedEnabled(): bool { return $this->failClosed; }
 
     /**
      * Set blocked countries (ISO 3166-1 alpha-2 codes)
@@ -638,6 +710,24 @@ class SecurityConfig
             throw new \InvalidArgumentException('GeoIP cache TTL must be between 1 hour and 7 days');
         }
         $this->geoipCacheTTL = $seconds;
+        return $this;
+    }
+
+    /**
+     * Enable fail-closed mode (block traffic on storage failure)
+     *
+     * FAIL-OPEN (false, default):
+     * - Storage unavailable → Allow traffic (prioritize availability)
+     *
+     * FAIL-CLOSED (true):
+     * - Storage unavailable → Block traffic (prioritize security)
+     *
+     * @param bool $enabled Enable fail-closed mode
+     * @return self
+     */
+    public function setFailClosed(bool $enabled): self
+    {
+        $this->failClosed = $enabled;
         return $this;
     }
 

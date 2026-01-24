@@ -8,7 +8,7 @@ use Senza1dio\SecurityShield\Contracts\StorageInterface;
 use Senza1dio\SecurityShield\Contracts\LoggerInterface;
 
 /**
- * ENTERPRISE GALAXY: Bot Verification Service
+ * Bot Verification Service
  *
  * Verifies legitimate search engine and crawler bots using DNS reverse lookup
  * and IP range verification. Prevents bot spoofing attacks by validating that
@@ -61,16 +61,21 @@ use Senza1dio\SecurityShield\Contracts\LoggerInterface;
  * ```
  *
  * @package Senza1dio\SecurityShield\Services
- * @version 1.0.0
- * @author Enterprise Security Team
+ * @version 2.0.0
+ * @author Senza1dio Security Team
  * @license MIT
  */
 class BotVerifier
 {
     /**
-     * Cache TTL for bot verification results (24 hours)
+     * Default cache TTL for bot verification results (24 hours)
      */
-    private const CACHE_TTL = 86400;
+    private const DEFAULT_CACHE_TTL = 86400;
+
+    /**
+     * Configurable cache TTL
+     */
+    private int $cacheTTL;
 
     /**
      * OpenAI bot User-Agent identifiers (IP verification)
@@ -107,11 +112,25 @@ class BotVerifier
      *
      * @param StorageInterface $storage Storage backend (Redis recommended)
      * @param LoggerInterface $logger Logger for security events
+     * @param int $cacheTTL Cache TTL in seconds (default: 24 hours)
      */
-    public function __construct(StorageInterface $storage, LoggerInterface $logger)
+    public function __construct(StorageInterface $storage, LoggerInterface $logger, int $cacheTTL = self::DEFAULT_CACHE_TTL)
     {
         $this->storage = $storage;
         $this->logger = $logger;
+        $this->cacheTTL = $cacheTTL;
+    }
+
+    /**
+     * Set cache TTL for bot verification results
+     *
+     * @param int $ttl TTL in seconds
+     * @return self
+     */
+    public function setCacheTTL(int $ttl): self
+    {
+        $this->cacheTTL = $ttl;
+        return $this;
     }
 
     /**
@@ -183,7 +202,7 @@ class BotVerifier
             }
         }
 
-        // STEP 4: Cache result (24h TTL)
+        // STEP 4: Cache result
         $this->storage->cacheBotVerification(
             $ip,
             $verified,
@@ -193,7 +212,7 @@ class BotVerifier
                 'verification_method' => $verificationMethod,
                 'timestamp' => time(),
             ],
-            self::CACHE_TTL
+            $this->cacheTTL
         );
 
         // STEP 5: Log verification result

@@ -65,6 +65,38 @@ interface StorageInterface
      *
      * Use isIpBannedCached() for hot-path ban checks (avoids DB query).
      *
+     * FAIL-OPEN vs FAIL-CLOSED BEHAVIOR:
+     * ===================================
+     *
+     * When storage backend (Redis/DB) is unavailable, implementations MUST choose:
+     *
+     * 1. FAIL-OPEN (Current Default):
+     *    - Returns false (not banned) on storage failure
+     *    - PRO: High availability - site stays online even if Redis/DB is down
+     *    - CON: Attackers bypass bans during outage
+     *    - USE CASE: E-commerce, public sites where uptime > security
+     *
+     * 2. FAIL-CLOSED (Strict Security):
+     *    - Returns true (banned) on storage failure
+     *    - PRO: Security maintained - attackers cannot exploit downtime
+     *    - CON: Legitimate users blocked during Redis/DB outage
+     *    - USE CASE: Banking, government, high-security applications
+     *
+     * DEFAULT IMPLEMENTATION: Fail-open (availability over security)
+     *
+     * To enable fail-closed behavior, implementations should:
+     * - Check SecurityConfig::isFailClosedEnabled()
+     * - Return true instead of false on exception
+     *
+     * EXAMPLE (RedisStorage with fail-closed):
+     * ```php
+     * try {
+     *     return $this->redis->exists($key) > 0;
+     * } catch (\RedisException $e) {
+     *     return $this->config->isFailClosedEnabled(); // true = fail-closed
+     * }
+     * ```
+     *
      * @param string $ip Client IP address
      * @return bool True if banned
      */
@@ -155,11 +187,21 @@ interface StorageInterface
      * Increments the request counter for a specific IP within a time window.
      * Used for rate limiting to prevent abuse and DDoS attacks.
      *
+     * IMPORTANT: The $action parameter allows tracking separate counters
+     * for different types of actions (e.g., 'login', 'checkout', 'api').
+     * This enables granular rate limiting per action type.
+     *
+     * EXAMPLES:
+     * - incrementRequestCount('1.2.3.4', 60, 'login') → Login attempts (separate counter)
+     * - incrementRequestCount('1.2.3.4', 300, 'checkout') → Checkout submissions (separate counter)
+     * - incrementRequestCount('1.2.3.4', 60, 'general') → General requests (default)
+     *
      * @param string $ip Client IP address
      * @param int $window Time window in seconds
+     * @param string $action Action type (default: 'general' for backward compatibility)
      * @return int Current request count after increment
      */
-    public function incrementRequestCount(string $ip, int $window): int;
+    public function incrementRequestCount(string $ip, int $window, string $action = 'general'): int;
 
     /**
      * Get request count for IP (rate limiting)
@@ -169,9 +211,10 @@ interface StorageInterface
      *
      * @param string $ip Client IP address
      * @param int $window Time window in seconds (not used in get, but kept for interface consistency)
+     * @param string $action Action type (default: 'general' for backward compatibility)
      * @return int Current request count (0 if not found or expired)
      */
-    public function getRequestCount(string $ip, int $window): int;
+    public function getRequestCount(string $ip, int $window, string $action = 'general'): int;
 
     /**
      * Clear all data (for testing)
@@ -179,4 +222,27 @@ interface StorageInterface
      * @return bool Success
      */
     public function clear(): bool;
+
+    /**
+     * Generic cache get operation
+     *
+     * Used by services (GeoIP, etc.) for caching arbitrary data.
+     * Returns null if key not found or cache unavailable.
+     *
+     * @param string $key Cache key
+     * @return mixed|null Cached value or null
+     */
+    public function get(string $key): mixed;
+
+    /**
+     * Generic cache set operation
+     *
+     * Used by services (GeoIP, etc.) for caching arbitrary data.
+     *
+     * @param string $key Cache key
+     * @param mixed $value Value to cache (will be JSON encoded if array/object)
+     * @param int $ttl Time to live in seconds
+     * @return bool Success
+     */
+    public function set(string $key, mixed $value, int $ttl): bool;
 }

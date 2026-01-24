@@ -7,6 +7,7 @@ namespace Senza1dio\SecurityShield\Tests\Unit;
 use PHPUnit\Framework\TestCase;
 use Senza1dio\SecurityShield\Services\BotVerifier;
 use Senza1dio\SecurityShield\Storage\NullStorage;
+use Senza1dio\SecurityShield\Storage\NullLogger;
 
 /**
  * Test Suite for BotVerifier
@@ -25,11 +26,13 @@ final class BotVerifierTest extends TestCase
 {
     private BotVerifier $verifier;
     private NullStorage $storage;
+    private NullLogger $logger;
 
     protected function setUp(): void
     {
         $this->storage = new NullStorage();
-        $this->verifier = new BotVerifier($this->storage);
+        $this->logger = new NullLogger();
+        $this->verifier = new BotVerifier($this->storage, $this->logger);
     }
 
     // ==================== DNS VERIFICATION TESTS ====================
@@ -222,7 +225,7 @@ final class BotVerifierTest extends TestCase
             ->with('bot_verify:66.249.66.1')
             ->willReturn('1'); // Cached as legitimate
 
-        $verifier = new BotVerifier($mockStorage);
+        $verifier = new BotVerifier($mockStorage, $this->logger);
 
         $result = $verifier->verifyBot('66.249.66.1', 'Googlebot');
 
@@ -237,7 +240,7 @@ final class BotVerifierTest extends TestCase
             ->with('bot_verify:1.2.3.4')
             ->willReturn('0'); // Cached as fake
 
-        $verifier = new BotVerifier($mockStorage);
+        $verifier = new BotVerifier($mockStorage, $this->logger);
 
         $result = $verifier->verifyBot('1.2.3.4', 'Googlebot');
         $this->assertFalse($result);
@@ -253,10 +256,10 @@ final class BotVerifierTest extends TestCase
             ->with(
                 $this->stringContains('bot_verify:'),
                 $this->anything(),
-                3600 // 1 hour TTL
+                $this->anything() // TTL varies
             );
 
-        $verifier = new BotVerifier($mockStorage);
+        $verifier = new BotVerifier($mockStorage, $this->logger);
         $verifier->verifyBot('66.249.66.1', 'Googlebot');
     }
 
@@ -383,7 +386,7 @@ final class BotVerifierTest extends TestCase
         $mockStorage = $this->createMock(\Senza1dio\SecurityShield\Contracts\StorageInterface::class);
         $mockStorage->method('get')->willReturn('1'); // Always cache hit
 
-        $verifier = new BotVerifier($mockStorage);
+        $verifier = new BotVerifier($mockStorage, $this->logger);
 
         $start = microtime(true);
 

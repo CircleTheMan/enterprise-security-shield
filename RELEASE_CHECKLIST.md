@@ -53,7 +53,7 @@
 - [x] .php-cs-fixer.php
 
 ### Verification
-- [x] Zero sensitive data (no need2talk references)
+- [x] Zero sensitive data (no project-specific references)
 - [x] Zero production IPs/passwords
 - [x] All edge cases documented
 - [x] All vulnerabilities fixed
@@ -64,7 +64,7 @@
 
 ### 1. GitHub Repository
 ```bash
-cd /Users/zelistore/zelistore-packages/enterprise-security-shield
+cd /path/to/security-shield
 
 # Initialize git (if not already done)
 git init

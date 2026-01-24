@@ -7,6 +7,7 @@ namespace Senza1dio\SecurityShield\Tests\Unit;
 use PHPUnit\Framework\TestCase;
 use Senza1dio\SecurityShield\Middleware\HoneypotMiddleware;
 use Senza1dio\SecurityShield\Config\SecurityConfig;
+use Senza1dio\SecurityShield\Exceptions\HoneypotAccessException;
 use Senza1dio\SecurityShield\Storage\NullStorage;
 
 /**
@@ -30,21 +31,25 @@ final class HoneypotMiddlewareTest extends TestCase
     private NullStorage $storage;
     private MockHoneypotLogger $logger;
 
+    /** @var array<int, string> Custom honeypot paths for testing */
+    private array $customPaths = [
+        '/admin',
+        '/login',
+        '/wp-admin',
+        '/.env',
+        '/phpmyadmin',
+    ];
+
     protected function setUp(): void
     {
         $this->storage = new NullStorage();
         $this->logger = new MockHoneypotLogger();
         $this->config = SecurityConfig::create()
             ->enableHoneypot(true)
-            ->setHoneypotEndpoints([
-                '/admin',
-                '/login',
-                '/wp-admin',
-                '/.env',
-                '/phpmyadmin',
-            ]);
+            ->setStorage($this->storage)
+            ->setLogger($this->logger);
 
-        $this->honeypot = new HoneypotMiddleware($this->config, $this->storage, $this->logger);
+        $this->honeypot = new HoneypotMiddleware($this->config, $this->customPaths);
     }
 
     // ==================== BASIC TRAP DETECTION ====================
@@ -53,43 +58,40 @@ final class HoneypotMiddlewareTest extends TestCase
     {
         $request = $this->createRequest('GET', '/admin', '1.2.3.4', 'Mozilla/5.0');
 
-        $result = $this->honeypot->handle($request);
-
-        $this->assertFalse($result, '/admin should be detected as trap');
-        $this->assertCount(1, $this->logger->logs);
-        $this->assertStringContainsString('Honeypot triggered', $this->logger->logs[0]['message']);
+        $this->expectException(HoneypotAccessException::class);
+        $this->honeypot->handle($request);
     }
 
     public function testDetectsLoginTrapEndpoint(): void
     {
         $request = $this->createRequest('GET', '/login', '1.2.3.4', 'Mozilla/5.0');
 
-        $result = $this->honeypot->handle($request);
-        $this->assertFalse($result, '/login should be detected as trap');
+        $this->expectException(HoneypotAccessException::class);
+        $this->honeypot->handle($request);
     }
 
     public function testDetectsWpAdminTrapEndpoint(): void
     {
         $request = $this->createRequest('GET', '/wp-admin', '1.2.3.4', 'Mozilla/5.0');
 
-        $result = $this->honeypot->handle($request);
-        $this->assertFalse($result, '/wp-admin should be detected as trap');
+        $this->expectException(HoneypotAccessException::class);
+        $this->honeypot->handle($request);
     }
 
     public function testDetectsEnvFileTrapEndpoint(): void
     {
         $request = $this->createRequest('GET', '/.env', '1.2.3.4', 'Mozilla/5.0');
 
-        $result = $this->honeypot->handle($request);
-        $this->assertFalse($result, '/.env should be detected as trap');
+        $this->expectException(HoneypotAccessException::class);
+        $this->honeypot->handle($request);
     }
 
     public function testDetectsPhpMyAdminTrapEndpoint(): void
     {
         $request = $this->createRequest('GET', '/phpmyadmin', '1.2.3.4', 'Mozilla/5.0');
 
-        $result = $this->honeypot->handle($request);
-        $this->assertFalse($result, '/phpmyadmin should be detected as trap');
+        $this->expectException(HoneypotAccessException::class);
+        $this->honeypot->handle($request);
     }
 
     public function testAllowsNonTrapEndpoint(): void
@@ -107,8 +109,8 @@ final class HoneypotMiddlewareTest extends TestCase
     {
         $request = $this->createRequest('GET', '/admin?debug=1', '1.2.3.4', 'Mozilla/5.0');
 
-        $result = $this->honeypot->handle($request);
-        $this->assertFalse($result, 'Trap with query string should be detected');
+        $this->expectException(HoneypotAccessException::class);
+        $this->honeypot->handle($request);
     }
 
     public function testDetectsTrapWithTrailingSlash(): void
@@ -551,6 +553,15 @@ final class HoneypotMiddlewareTest extends TestCase
 
     // ==================== HELPER METHODS ====================
 
+    /**
+     * Create a $_SERVER-like array for testing
+     *
+     * @param string $method HTTP method (GET, POST, etc.)
+     * @param string $uri Request URI (e.g., '/admin?debug=1')
+     * @param string $ip Client IP address
+     * @param string|null $userAgent User-Agent header
+     * @return array<string, mixed> $_SERVER-like array
+     */
     private function createRequest(
         string $method,
         string $uri,
@@ -558,12 +569,12 @@ final class HoneypotMiddlewareTest extends TestCase
         ?string $userAgent
     ): array {
         return [
-            'method' => $method,
-            'uri' => $uri,
-            'ip' => $ip,
-            'user_agent' => $userAgent,
-            'get' => [],
-            'post' => [],
+            'REQUEST_METHOD' => $method,
+            'REQUEST_URI' => $uri,
+            'REMOTE_ADDR' => $ip,
+            'HTTP_USER_AGENT' => $userAgent ?? '',
+            'SERVER_PROTOCOL' => 'HTTP/1.1',
+            'HTTP_HOST' => 'localhost',
         ];
     }
 }

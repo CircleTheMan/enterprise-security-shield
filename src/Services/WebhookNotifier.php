@@ -30,36 +30,25 @@ class WebhookNotifier
             throw new \InvalidArgumentException("Invalid webhook URL: {$url}");
         }
 
+        // SECURITY: Require HTTPS to prevent credential interception
+        $scheme = parse_url($url, PHP_URL_SCHEME);
+        if ($scheme !== 'https') {
+            throw new \InvalidArgumentException("Webhook URL must use HTTPS: {$url}");
+        }
+
         // SECURITY: Prevent SSRF by blocking private/local URLs
         $host = parse_url($url, PHP_URL_HOST);
         if (is_string($host)) {
             // Block localhost variants (IPv4 + IPv6)
-            if (in_array(strtolower($host), ['localhost', '127.0.0.1', '::1'], true)) {
+            $hostLower = strtolower($host);
+            if (in_array($hostLower, ['localhost', '127.0.0.1', '::1', '0.0.0.0'], true)) {
                 throw new \InvalidArgumentException("Webhook URL cannot be localhost: {$url}");
             }
 
-            // Block private IP ranges (RFC 1918 for IPv4, RFC 4193 for IPv6)
-            if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-                // IPv4 private ranges
-                $ip = ip2long($host);
-                if ($ip !== false) {
-                    // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-                    if (($ip >= 167772160 && $ip <= 184549375) ||  // 10.0.0.0/8
-                        ($ip >= 2886729728 && $ip <= 2887778303) || // 172.16.0.0/12
-                        ($ip >= 3232235520 && $ip <= 3232301055)) { // 192.168.0.0/16
-                        throw new \InvalidArgumentException("Webhook URL cannot be private IP: {$url}");
-                    }
-                }
-            } elseif (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-                // IPv6 private/local ranges (RFC 4193: fc00::/7, fe80::/10, ::1)
-                $ipBin = inet_pton($host);
-                if ($ipBin !== false) {
-                    $firstByte = ord($ipBin[0]);
-                    // fc00::/7 (private), fe80::/10 (link-local)
-                    if (($firstByte >= 0xfc && $firstByte <= 0xfd) || // fc00::/7
-                        ($firstByte == 0xfe && (ord($ipBin[1]) & 0xc0) == 0x80)) { // fe80::/10
-                        throw new \InvalidArgumentException("Webhook URL cannot be private IPv6: {$url}");
-                    }
+            // Block private IP ranges using IPUtils (comprehensive check)
+            if (filter_var($host, FILTER_VALIDATE_IP)) {
+                if (\Senza1dio\SecurityShield\Utils\IPUtils::isPrivateIP($host)) {
+                    throw new \InvalidArgumentException("Webhook URL cannot be private/reserved IP: {$url}");
                 }
             }
         }
@@ -114,7 +103,26 @@ class WebhookNotifier
     }
 
     /**
-     * Send webhook async (non-blocking)
+     * Send webhook async (fire-and-forget, non-blocking)
+     *
+     * IMPLEMENTATION NOTES:
+     * This is NOT truly async (no promises/coroutines). It's "fire-and-forget":
+     * - Opens socket connection
+     * - Writes HTTP request
+     * - Closes socket WITHOUT waiting for response
+     * - Response is discarded by OS after TCP FIN
+     *
+     * TRADE-OFFS:
+     * - PRO: Zero dependencies, works everywhere
+     * - PRO: Doesn't block the request (~1-5ms overhead)
+     * - CON: No delivery confirmation
+     * - CON: No retry on failure
+     * - CON: May fail silently if webhook endpoint is down
+     *
+     * FOR TRUE ASYNC:
+     * - Use ReactPHP HttpClient
+     * - Use Guzzle with promises
+     * - Use job queue (Redis/RabbitMQ + worker)
      *
      * @param string $url
      * @param string $json
@@ -134,6 +142,11 @@ class WebhookNotifier
         $port = $parts['port'] ?? ($scheme === 'https' ? 443 : 80);
         $path = $parts['path'] ?? '/';
 
+        // Preserve query string if present (e.g., Slack webhook tokens)
+        if (isset($parts['query']) && $parts['query'] !== '') {
+            $path .= '?' . $parts['query'];
+        }
+
         if ($scheme === 'https') {
             $host = 'ssl://' . $host;
         }
@@ -141,8 +154,18 @@ class WebhookNotifier
         $fp = @fsockopen($host, $port, $errno, $errstr, 1);
 
         if ($fp) {
-            $hostHeader = $parts['host'] ?? $host;
-            $request = "POST {$path} HTTP/1.1\r\n";
+            $hostHeader = $parts['host'] ?? '';
+
+            // SECURITY: Prevent CRLF injection in Host header
+            if (empty($hostHeader) || preg_match('/[\r\n]/', $hostHeader)) {
+                fclose($fp);
+                return;
+            }
+
+            // SECURITY: Sanitize path to prevent request smuggling
+            $safePath = preg_replace('/[\r\n]/', '', $path);
+
+            $request = "POST {$safePath} HTTP/1.1\r\n";
             $request .= "Host: {$hostHeader}\r\n";
             $request .= "Content-Type: application/json\r\n";
             $request .= "Content-Length: " . strlen($json) . "\r\n";
@@ -175,7 +198,11 @@ class WebhookNotifier
             ]);
 
             curl_exec($ch);
-            curl_close($ch);
+            // PHP 8.0+ automatically closes CurlHandle when going out of scope
+            // For PHP 7.x compatibility, we must explicitly close
+            if (PHP_VERSION_ID < 80000) {
+                curl_close($ch);
+            }
         } catch (\Throwable $e) {
             // Graceful degradation - don't crash on webhook failure
         }

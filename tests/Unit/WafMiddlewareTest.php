@@ -5,19 +5,17 @@ declare(strict_types=1);
 namespace Senza1dio\SecurityShield\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
-use Senza1dio\SecurityShield\Middleware\WafMiddleware;
+use Senza1dio\SecurityShield\Middleware\SecurityMiddleware;
 use Senza1dio\SecurityShield\Config\SecurityConfig;
 use Senza1dio\SecurityShield\Storage\NullStorage;
 use Senza1dio\SecurityShield\Contracts\LoggerInterface;
 
 /**
- * Test Suite for WafMiddleware
+ * Test Suite for SecurityMiddleware
  *
  * Coverage:
  * - Progressive scoring system
- * - Rate limiting (100 req/min)
- * - SQL injection detection
- * - XSS payload detection
+ * - Rate limiting
  * - IP banning logic
  * - Whitelist/blacklist
  * - Bot verification
@@ -29,7 +27,7 @@ use Senza1dio\SecurityShield\Contracts\LoggerInterface;
  */
 final class WafMiddlewareTest extends TestCase
 {
-    private WafMiddleware $waf;
+    private SecurityMiddleware $middleware;
     private SecurityConfig $config;
     private NullStorage $storage;
     private MockLogger $logger;
@@ -39,13 +37,10 @@ final class WafMiddlewareTest extends TestCase
         $this->storage = new NullStorage();
         $this->logger = new MockLogger();
         $this->config = SecurityConfig::create()
-            ->enableWAF(true)
             ->enableBotProtection(true)
-            ->setRateLimitPerMinute(100)
-            ->enableSQLInjectionDetection(true)
-            ->enableXSSDetection(true);
+            ->setRateLimitMax(100);
 
-        $this->waf = new WafMiddleware($this->config, $this->storage, $this->logger);
+        $this->middleware = new SecurityMiddleware($this->config, $this->storage, $this->logger);
     }
 
     // ==================== BASIC FUNCTIONALITY ====================
@@ -54,7 +49,7 @@ final class WafMiddlewareTest extends TestCase
     {
         $request = $this->createRequest('GET', '/', [], '1.2.3.4', 'Mozilla/5.0');
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
 
         $this->assertTrue($result, 'Legitimate request should be allowed');
     }
@@ -70,7 +65,7 @@ final class WafMiddlewareTest extends TestCase
             'sqlmap/1.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
 
         $this->assertFalse($result, 'High score request should be blocked');
     }
@@ -136,7 +131,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
 
         $this->assertFalse($result, 'SQL injection should be blocked');
         $this->assertCount(1, $this->logger->logs);
@@ -153,7 +148,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'UNION attack should be blocked');
     }
 
@@ -167,7 +162,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'SQL comment injection should be blocked');
     }
 
@@ -182,7 +177,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         // Dovrebbe essere consentito (singola quote non è pattern di injection)
         $this->assertIsBool($result);
     }
@@ -200,7 +195,7 @@ final class WafMiddlewareTest extends TestCase
             ['comment' => '<script>alert("XSS")</script>']
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
 
         $this->assertFalse($result, 'XSS <script> tag should be blocked');
         $this->assertCount(1, $this->logger->logs);
@@ -218,7 +213,7 @@ final class WafMiddlewareTest extends TestCase
             ['bio' => '<img src=x onerror=alert(1)>']
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'XSS onerror should be blocked');
     }
 
@@ -233,7 +228,7 @@ final class WafMiddlewareTest extends TestCase
             ['link' => 'javascript:void(0)']
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'XSS javascript: protocol should be blocked');
     }
 
@@ -249,7 +244,7 @@ final class WafMiddlewareTest extends TestCase
             ['content' => '<b>Bold text</b> and <i>italic</i>']
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertTrue($result, 'Safe HTML should be allowed');
     }
 
@@ -265,7 +260,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'Path traversal should be blocked');
     }
 
@@ -279,7 +274,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'WP admin access should be blocked');
     }
 
@@ -293,7 +288,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'phpMyAdmin access should be blocked');
     }
 
@@ -307,7 +302,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, '.env access should be blocked');
     }
 
@@ -323,7 +318,7 @@ final class WafMiddlewareTest extends TestCase
             'sqlmap/1.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'sqlmap should be blocked');
     }
 
@@ -337,7 +332,7 @@ final class WafMiddlewareTest extends TestCase
             'Nikto/2.1.6'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'Nikto scanner should be blocked');
     }
 
@@ -351,7 +346,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0 (compatible; Nmap Scripting Engine;'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'Nmap should be blocked');
     }
 
@@ -365,7 +360,7 @@ final class WafMiddlewareTest extends TestCase
             'Burp Suite Professional'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'Burp Suite should be blocked');
     }
 
@@ -381,7 +376,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1;'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertFalse($result, 'Fake IE9 should be blocked');
     }
 
@@ -395,7 +390,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/30.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         // Chrome 30 è del 2013, dovrebbe essere bloccato
         $this->assertFalse($result, 'Ancient Chrome should be blocked');
     }
@@ -587,7 +582,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
 
         // Dovrebbe essere consentito (se DNS verifica)
         $this->assertIsBool($result);
@@ -604,7 +599,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
 
         // Dovrebbe essere bloccato (fake bot)
         $this->assertFalse($result);
@@ -616,7 +611,7 @@ final class WafMiddlewareTest extends TestCase
     {
         $request = $this->createRequest('GET', '/', [], '1.2.3.4', '');
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertIsBool($result);
     }
 
@@ -624,7 +619,7 @@ final class WafMiddlewareTest extends TestCase
     {
         $request = $this->createRequest('GET', '/', [], '1.2.3.4', null);
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertIsBool($result);
     }
 
@@ -633,7 +628,7 @@ final class WafMiddlewareTest extends TestCase
         $longPath = '/' . str_repeat('a', 10000);
         $request = $this->createRequest('GET', $longPath, [], '1.2.3.4', 'Mozilla/5.0');
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertIsBool($result);
     }
 
@@ -647,7 +642,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertTrue($result, 'Special characters should be allowed');
     }
 
@@ -666,7 +661,7 @@ final class WafMiddlewareTest extends TestCase
             'Mozilla/5.0'
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertTrue($result, 'Multiple params should be allowed');
     }
 
@@ -685,7 +680,7 @@ final class WafMiddlewareTest extends TestCase
             ]
         );
 
-        $result = $this->waf->handle($request);
+        $result = $this->middleware->handle($request);
         $this->assertTrue($result, 'Multiple POST params should be allowed');
     }
 
