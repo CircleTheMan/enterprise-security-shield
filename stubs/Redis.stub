@@ -1,0 +1,84 @@
+<?php
+
+/**
+ * Redis stub for PHPStan
+ */
+class Redis
+{
+    /**
+     * @return string|bool
+     */
+    public function ping(string $message = null) {}
+
+    /**
+     * @return string|false
+     */
+    public function get(string $key) {}
+
+    /**
+     * @return bool
+     */
+    public function set(string $key, string $value, array|int|null $options = null) {}
+
+    /**
+     * @return int|false
+     */
+    public function del(string ...$keys) {}
+
+    /**
+     * @return bool
+     */
+    public function exists(string ...$keys) {}
+
+    /**
+     * @return int|false
+     */
+    public function incr(string $key) {}
+
+    /**
+     * @return int|false
+     */
+    public function incrBy(string $key, int $value) {}
+
+    /**
+     * @return int|false
+     */
+    public function decr(string $key) {}
+
+    /**
+     * @return int|false
+     */
+    public function decrBy(string $key, int $value) {}
+
+    /**
+     * @return bool
+     */
+    public function expire(string $key, int $timeout, ?string $mode = null) {}
+
+    /**
+     * @return array<string, mixed>|false
+     */
+    public function info(?string $option = null) {}
+
+    /**
+     * @return bool
+     */
+    public function setex(string $key, int $expire, string $value) {}
+
+    /**
+     * @return int|false
+     */
+    public function ttl(string $key) {}
+
+    /**
+     * @return array<string>|false
+     */
+    public function keys(string $pattern) {}
+
+    /**
+     * @return bool
+     */
+    public function flushDB(?bool $async = null) {}
+}
+
+class RedisException extends Exception {}

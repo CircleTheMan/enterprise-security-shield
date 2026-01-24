@@ -329,7 +329,8 @@ LUA;
             // Mark as logged for 60 seconds
             $this->redis->setex($dedupKey, 60, '1');
         } catch (\RedisException $e) {
-            // Dedup failed - log anyway (better than losing events)
+            // Dedup failed - log warning but continue (better than losing events)
+            error_log("RedisStorage: Event dedup check failed - " . $e->getMessage());
         }
 
         $key = $this->keyPrefix . 'events:' . $type;
@@ -351,7 +352,8 @@ LUA;
 
             return true;
         } catch (\RedisException $e) {
-            // Fail silently - event logging shouldn't block security checks
+            // Log but don't block - event logging shouldn't break security checks
+            error_log("RedisStorage: Event logging failed - " . $e->getMessage());
             return false;
         }
     }
@@ -621,6 +623,67 @@ LUA;
             return $this->redis->setex($this->keyPrefix . $key, $ttl, $value) !== false;
         } catch (\RedisException $e) {
             return false;
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function delete(string $key): bool
+    {
+        try {
+            $deleted = $this->redis->del($this->keyPrefix . $key);
+            return $deleted !== false;
+        } catch (\RedisException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function exists(string $key): bool
+    {
+        try {
+            $exists = $this->redis->exists($this->keyPrefix . $key);
+            return is_int($exists) && $exists > 0;
+        } catch (\RedisException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Uses Lua script for atomic INCRBY + conditional EXPIRE.
+     * TTL is only set when key doesn't exist or has no TTL.
+     */
+    public function increment(string $key, int $delta, int $ttl): int
+    {
+        $fullKey = $this->keyPrefix . $key;
+
+        // Lua script: Atomic increment + conditional expire
+        $lua = <<<'LUA'
+local key = KEYS[1]
+local delta = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local newVal = redis.call('INCRBY', key, delta)
+if redis.call('TTL', key) < 0 then
+    redis.call('EXPIRE', key, ttl)
+end
+return newVal
+LUA;
+
+        try {
+            $result = $this->redis->eval($lua, [$fullKey, $delta, $ttl], 1);
+
+            if (!is_int($result)) {
+                return 0;
+            }
+
+            return $result;
+        } catch (\RedisException $e) {
+            return 0;
         }
     }
 }

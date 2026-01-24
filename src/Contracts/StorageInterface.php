@@ -245,4 +245,44 @@ interface StorageInterface
      * @return bool Success
      */
     public function set(string $key, mixed $value, int $ttl): bool;
+
+    /**
+     * Generic cache delete operation
+     *
+     * Removes a key from the cache.
+     *
+     * @param string $key Cache key to delete
+     * @return bool Success (true even if key didn't exist)
+     */
+    public function delete(string $key): bool;
+
+    /**
+     * Check if a key exists in the cache
+     *
+     * @param string $key Cache key
+     * @return bool True if key exists
+     */
+    public function exists(string $key): bool;
+
+    /**
+     * Generic atomic increment operation
+     *
+     * Used by resilience patterns (CircuitBreaker, Bulkhead, RateLimiter)
+     * for tracking counters with automatic TTL.
+     *
+     * ATOMICITY REQUIREMENT:
+     * This operation MUST be atomic to prevent race conditions.
+     * - Redis: Use INCRBY with conditional EXPIRE
+     * - Database: Use UPDATE ... SET counter = counter + ?
+     * - In-memory: Use locks or atomic operations
+     *
+     * NEGATIVE VALUES:
+     * Supports negative delta for decrementing (e.g., releasing bulkhead slots).
+     *
+     * @param string $key Cache key
+     * @param int $delta Value to add (can be negative)
+     * @param int $ttl Time to live in seconds (only applied to new keys)
+     * @return int New value after increment
+     */
+    public function increment(string $key, int $delta, int $ttl): int;
 }

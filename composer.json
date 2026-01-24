@@ -1,18 +1,18 @@
 {
     "name": "senza1dio/security-shield",
-    "description": "Security Middleware, Honeypot & Bot Protection for PHP - Framework-Agnostic, Zero Configuration",
+    "description": "Security Middleware for PHP - Honeypot, Scanner Detection, Rate Limiting, Resilience Patterns",
     "type": "library",
     "keywords": [
         "security",
         "middleware",
         "honeypot",
-        "bot protection",
-        "threat detection",
-        "ip blocking",
-        "rate limiting",
-        "php security",
-        "laravel",
-        "symfony"
+        "rate-limiting",
+        "circuit-breaker",
+        "resilience",
+        "anomaly-detection",
+        "prometheus",
+        "opentelemetry",
+        "health-check"
     ],
     "license": "MIT",
     "authors": [

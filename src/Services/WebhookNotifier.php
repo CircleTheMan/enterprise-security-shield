@@ -153,12 +153,17 @@ class WebhookNotifier
 
         $fp = @fsockopen($host, $port, $errno, $errstr, 1);
 
-        if ($fp) {
+        if (!$fp) {
+            error_log("WebhookNotifier: Async connection failed to {$host}:{$port} - {$errstr} ({$errno})");
+            return;
+        }
+
+        try {
             $hostHeader = $parts['host'] ?? '';
 
             // SECURITY: Prevent CRLF injection in Host header
             if (empty($hostHeader) || preg_match('/[\r\n]/', $hostHeader)) {
-                fclose($fp);
+                error_log("WebhookNotifier: Invalid host header detected");
                 return;
             }
 
@@ -172,8 +177,15 @@ class WebhookNotifier
             $request .= "Connection: Close\r\n\r\n";
             $request .= $json;
 
-            fwrite($fp, $request);
-            fclose($fp);
+            // Set write timeout
+            stream_set_timeout($fp, 5);
+
+            $written = fwrite($fp, $request);
+            if ($written === false) {
+                error_log("WebhookNotifier: Failed to write to socket");
+            }
+        } finally {
+            @fclose($fp);
         }
     }
 

@@ -3,56 +3,85 @@
 [![PHP Version](https://img.shields.io/badge/PHP-%5E8.1-blue)](https://www.php.net/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**Honeypot & Scanner Detection Middleware for PHP 8.1+**
+**Security Middleware for PHP 8.1+**
 
-Detects vulnerability scanners (sqlmap, nikto) and path probing (/.env, /.git). Framework-agnostic, zero dependencies.
-
----
-
-## What This Is
-
-- **Honeypot System** - Traps scanners probing /.env, /.git, /admin paths
-- **Scanner Detection** - Identifies sqlmap, nikto, masscan by User-Agent
-- **Rate Limiting** - IP-based request throttling
-- **Bot Verification** - DNS validation for legitimate crawlers (Google, Bing)
-- **Geo-Blocking** - Country-level IP restrictions (optional)
-
-## What This Is NOT
-
-- **Not a WAF** - No SQL injection or XSS detection
-- **Not DDoS Protection** - Use Cloudflare/AWS Shield for that
-- **Not Zero-Day Protection** - No ML, no behavioral analysis
-
-**For actual WAF**: Use ModSecurity, Cloudflare WAF, or AWS WAF alongside this.
+Honeypot, scanner detection, and resilience patterns for PHP applications.
 
 ---
 
-## Quick Start
+## What This Package Does
+
+- **Honeypot System** - 69 trap endpoints to catch scanners (/.env, /wp-admin, etc.)
+- **Scanner Detection** - Identifies sqlmap, nikto, masscan by signatures
+- **Rate Limiting** - 4 algorithms: sliding window, token bucket, leaky bucket, fixed window
+- **IP Scoring** - Accumulates threat scores based on behavior
+- **Bot Verification** - DNS-based verification for Googlebot, Bingbot
+- **Geo-Blocking** - Country-level restrictions via external GeoIP provider
+
+## What This Package Does NOT Do
+
+- **Not a WAF** - No SQL injection, XSS, or OWASP Top 10 detection
+- **Not DDoS Protection** - Cannot handle volumetric attacks (use Cloudflare/AWS Shield)
+- **Not ML-Based** - No machine learning, just signature and statistical detection
+- **Not Penetration Tested** - Has not undergone professional security audit
+
+**Use alongside a real WAF (ModSecurity, Cloudflare) for production.**
+
+---
+
+## Architecture
+
+### Resilience Patterns
+
+| Pattern | Description | Storage Required |
+|---------|-------------|------------------|
+| Circuit Breaker | Fail fast when dependency is down | Redis (distributed) or none (local) |
+| Retry Policy | Exponential backoff with jitter | None |
+| Fallback Chain | Try providers in order until success | None |
+| Bulkhead | Limit concurrent executions | Redis |
+
+### Observability
+
+| Component | Format | Notes |
+|-----------|--------|-------|
+| Tracing | OpenTelemetry-compatible | W3C traceparent context propagation |
+| Metrics | Prometheus text format | Counters, gauges, histograms |
+| Health | JSON + HTTP status | Liveness/readiness for Kubernetes |
+
+### Anomaly Detection
+
+| Detector | What It Detects |
+|----------|-----------------|
+| Statistical | Values outside Z-score threshold |
+| Rate | Request rate spikes/drops |
+| Pattern | Unusual paths, methods, user agents |
+| Time-Based | Activity during unusual hours |
+
+---
+
+## Installation
 
 ```bash
 composer require senza1dio/security-shield
 ```
+
+## Quick Start
 
 ```php
 <?php
 use Senza1dio\SecurityShield\Middleware\SecurityMiddleware;
 use Senza1dio\SecurityShield\Config\SecurityConfig;
 use Senza1dio\SecurityShield\Storage\RedisStorage;
-use Senza1dio\SecurityShield\Storage\NullLogger;
 
-// Connect Redis
+// Redis required for distributed state
 $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 
-// Create middleware
 $storage = new RedisStorage($redis);
-$config = (new SecurityConfig())
-    ->setStorage($storage)
-    ->setLogger(new NullLogger());
+$config = (new SecurityConfig())->setStorage($storage);
 
 $security = new SecurityMiddleware($config);
 
-// Protect your app
 if (!$security->handle($_SERVER)) {
     http_response_code(403);
     exit('Access Denied');
@@ -61,128 +90,159 @@ if (!$security->handle($_SERVER)) {
 
 ---
 
-## Features
+## Usage Examples
 
-### Threat Scoring
-- Accumulates points for suspicious behavior
-- Auto-ban at configurable threshold (default: 50 points)
-- Critical paths: +30 points (/.env, /.git)
-- Scanner User-Agents: +30 points (sqlmap, nikto)
-- Empty User-Agent: +100 points (instant ban)
-
-### Honeypot Traps
-50+ trap endpoints including:
-- `/.env`, `/.git/config`, `/.aws/credentials`
-- `/phpinfo.php`, `/admin.php`, `/wp-admin`
-- `/backup.sql`, `/dump.sql`
-
-### Bot Verification
-- DNS reverse/forward lookup for Google, Bing, Yandex
-- IP range verification for OpenAI bots (ChatGPT-User, GPTBot)
-- 24-hour cache to minimize DNS lookups
-
-### Storage Backends
-- **RedisStorage** - Production recommended
-- **NullStorage** - Development/testing
-
----
-
-## Configuration
+### Circuit Breaker
 
 ```php
-$config = (new SecurityConfig())
-    ->setScoreThreshold(50)           // Auto-ban threshold
-    ->setBanDuration(86400)           // 24 hours
-    ->setTrackingWindow(3600)         // 1 hour
-    ->enableHoneypot(true)
-    ->enableBotVerification(true)
-    ->addIPWhitelist(['127.0.0.1'])
-    ->addIPBlacklist(['1.2.3.4'])
-    ->setStorage($storage)
-    ->setLogger($logger);
+use Senza1dio\SecurityShield\Resilience\CircuitBreaker;
+
+$breaker = new CircuitBreaker('redis', $storage, [
+    'failure_threshold' => 5,    // Open after 5 failures
+    'recovery_timeout' => 30,    // Try again after 30s
+    'half_open_max_calls' => 3,  // Allow 3 test calls
+]);
+
+// State logged to error_log on transitions
+$result = $breaker->call(
+    fn() => $redis->get('key'),
+    fn() => 'fallback-value'
+);
 ```
 
----
+**Limitation:** In PHP-FPM, each worker has independent in-memory state if Redis unavailable.
 
-## Framework Integration
-
-### Laravel
+### Retry Policy
 
 ```php
-// app/Http/Middleware/SecurityShield.php
-namespace App\Http\Middleware;
+use Senza1dio\SecurityShield\Resilience\RetryPolicy;
 
-use Closure;
-use Illuminate\Http\Request;
-use Senza1dio\SecurityShield\Middleware\SecurityMiddleware;
-use Senza1dio\SecurityShield\Config\SecurityConfig;
-use Senza1dio\SecurityShield\Storage\RedisStorage;
+$policy = RetryPolicy::exponentialBackoffWithJitter(
+    maxAttempts: 5,
+    baseDelay: 1.0,
+    maxDelay: 30.0
+);
 
-class SecurityShield
-{
-    public function handle(Request $request, Closure $next)
-    {
-        $redis = app('redis')->connection()->client();
-        $storage = new RedisStorage($redis);
-
-        $config = (new SecurityConfig())->setStorage($storage);
-        $security = new SecurityMiddleware($config);
-
-        if (!$security->handle($request->server->all())) {
-            abort(403);
-        }
-
-        return $next($request);
-    }
-}
+// Delays: ~1s, ~2s, ~4s, ~8s (with random jitter)
+$result = $policy->execute(fn() => $api->call());
 ```
 
-### Symfony
+### Rate Limiting
 
 ```php
-// src/EventListener/SecurityShieldListener.php
-namespace App\EventListener;
+use Senza1dio\SecurityShield\RateLimiting\RateLimiter;
 
-use Symfony\Component\HttpKernel\Event\RequestEvent;
-use Senza1dio\SecurityShield\Middleware\SecurityMiddleware;
-use Senza1dio\SecurityShield\Config\SecurityConfig;
-use Senza1dio\SecurityShield\Storage\RedisStorage;
+// Token bucket: 100 tokens, refills 10/second
+$limiter = RateLimiter::tokenBucket($storage, 100, 10);
 
-class SecurityShieldListener
-{
-    public function onKernelRequest(RequestEvent $event): void
-    {
-        if (!$event->isMainRequest()) return;
-
-        $redis = new \Redis();
-        $redis->connect('127.0.0.1', 6379);
-
-        $config = (new SecurityConfig())->setStorage(new RedisStorage($redis));
-        $security = new SecurityMiddleware($config);
-
-        if (!$security->handle($event->getRequest()->server->all())) {
-            throw new \Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException();
-        }
-    }
-}
-```
-
----
-
-## Honeypot Usage
-
-```php
-use Senza1dio\SecurityShield\Middleware\HoneypotMiddleware;
-use Senza1dio\SecurityShield\Exceptions\HoneypotAccessException;
-
-$honeypot = new HoneypotMiddleware($config);
-
-try {
-    $honeypot->handle($_SERVER);
-} catch (HoneypotAccessException $e) {
-    // Attacker hit honeypot - send fake response
-    echo $e->getResponse();
+$result = $limiter->attempt('user:123');
+if (!$result->allowed) {
+    // $result->retryAfter contains seconds to wait
+    http_response_code(429);
     exit;
+}
+```
+
+### Health Checks
+
+```php
+use Senza1dio\SecurityShield\Health\HealthCheck;
+use Senza1dio\SecurityShield\Health\Checks\RedisHealthCheck;
+
+$health = new HealthCheck();
+$health->addCheck('redis', new RedisHealthCheck($redis));
+
+// Returns HealthResult with HTTP status code
+$result = $health->readiness();
+
+header('Content-Type: application/json');
+http_response_code($result->getHttpStatusCode());
+echo $result->toJson();
+```
+
+### Distributed Tracing
+
+```php
+use Senza1dio\SecurityShield\Telemetry\Tracer;
+use Senza1dio\SecurityShield\Telemetry\SpanKind;
+
+$tracer = new Tracer('my-service', '1.0.0');
+
+// Extract parent context from incoming request
+$parentContext = $tracer->extractContext(getallheaders());
+
+$span = $tracer->startSpanFromContext('handle-request', $parentContext, SpanKind::SERVER);
+$span->setAttribute('http.method', $_SERVER['REQUEST_METHOD']);
+
+// ... process request ...
+
+$span->setStatus(SpanStatus::OK);
+$tracer->endSpan($span);
+$tracer->flush(); // Export spans
+```
+
+### Hot-Reload Configuration
+
+```php
+use Senza1dio\SecurityShield\Config\ConfigProvider;
+
+$config = new ConfigProvider($storage, [
+    'cache_ttl' => 60,  // Reload from Redis every 60s
+]);
+
+$config->setDefaults(['threshold' => 50]);
+
+// Update from anywhere - all instances pick up changes
+$config->setRemote('threshold', 100);
+
+// Later reads get new value after cache expires
+$value = $config->get('threshold'); // 100
+```
+
+**Note:** Changes propagate on cache expiry, not instantly.
+
+---
+
+## Notifications
+
+```php
+use Senza1dio\SecurityShield\Notifications\NotificationManager;
+use Senza1dio\SecurityShield\Notifications\TelegramNotifier;
+use Senza1dio\SecurityShield\Notifications\SlackNotifier;
+
+$manager = new NotificationManager();
+$manager->addChannel(new TelegramNotifier($botToken, $chatId));
+$manager->addChannel(new SlackNotifier($webhookUrl));
+
+// Send to all channels
+$result = $manager->broadcast('Security Alert', 'IP banned: 1.2.3.4', [
+    'reason' => 'Honeypot access',
+]);
+
+// Check results
+if (!$result->allSuccessful()) {
+    foreach ($result->getErrors() as $channel => $error) {
+        error_log("Notification to {$channel} failed: {$error}");
+    }
+}
+```
+
+---
+
+## Configuration Validation
+
+```php
+use Senza1dio\SecurityShield\Config\ConfigValidator;
+
+$validator = ConfigValidator::create()
+    ->required()
+    ->type('integer')
+    ->min(1)
+    ->max(1000);
+
+$result = $validator->validate($value);
+if (!$result->valid) {
+    throw new InvalidArgumentException($result->error);
 }
 ```
 
@@ -190,12 +250,45 @@ try {
 
 ## Requirements
 
-- PHP 8.1+
+- PHP 8.1+ (uses enums, readonly properties)
 - ext-json
 
-### Optional
-- ext-redis (for RedisStorage)
+### Optional Extensions
+- ext-redis (for RedisStorage - recommended for production)
 - ext-pdo (for DatabaseStorage)
+- ext-curl (for notification channels, GeoIP)
+
+---
+
+## Storage Backends
+
+| Backend | Use Case | Pros | Cons |
+|---------|----------|------|------|
+| RedisStorage | Production | Fast, distributed state | Requires Redis server |
+| DatabaseStorage | Existing DB | No extra infra | Slower, more complex |
+| NullStorage | Testing | No dependencies | Data lost per request |
+
+---
+
+## Known Limitations
+
+1. **No Persistence in NullStorage** - Data lost between requests
+2. **Clock Skew** - Rate limiting assumes synchronized clocks
+3. **Memory Growth** - Tracer spans queue in memory until flush
+4. **Blocking Operations** - SMTP notifications block during send
+5. **No Clustering** - Each PHP worker has independent memory state
+
+---
+
+## Error Handling
+
+All network operations log errors to `error_log()`:
+- SMTP failures
+- Webhook failures
+- Redis connection issues
+- Circuit breaker state changes
+
+Configure PHP error_log to capture these in production.
 
 ---
 
@@ -203,8 +296,9 @@ try {
 
 ```bash
 composer install
-composer test      # PHPUnit
-composer stan      # PHPStan level 5
+composer test          # PHPUnit tests
+composer stan          # PHPStan level 8
+composer cs-check      # Code style check
 ```
 
 ---
@@ -212,15 +306,3 @@ composer stan      # PHPStan level 5
 ## License
 
 MIT License - see [LICENSE](LICENSE)
-
----
-
-## Limitations
-
-This package blocks known scanner patterns. It does NOT:
-- Parse request bodies for SQL injection
-- Detect XSS in responses
-- Provide behavioral analysis
-- Protect against zero-day attacks
-
-Use this as a **pre-filter** alongside a real WAF for defense-in-depth.

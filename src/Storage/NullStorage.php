@@ -354,4 +354,50 @@ class NullStorage implements StorageInterface
         ];
         return true;
     }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function delete(string $key): bool
+    {
+        unset($this->cache[$key]);
+        return true;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function exists(string $key): bool
+    {
+        if (!isset($this->cache[$key])) {
+            return false;
+        }
+
+        // Check expiration
+        if (time() > $this->cache[$key]['expires_at']) {
+            unset($this->cache[$key]);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function increment(string $key, int $delta, int $ttl): int
+    {
+        $current = $this->get($key);
+        $currentValue = is_numeric($current) ? (int) $current : 0;
+        $newValue = $currentValue + $delta;
+
+        // Don't go below zero for counters
+        if ($newValue < 0) {
+            $newValue = 0;
+        }
+
+        $this->set($key, (string) $newValue, $ttl);
+
+        return $newValue;
+    }
 }

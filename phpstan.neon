@@ -1,0 +1,28 @@
+parameters:
+    level: 8
+    paths:
+        - src
+    excludePaths:
+        - src/Contracts
+
+    # PHP 8.1+ features
+    phpVersion: 80100
+
+    # Report mixed
+    checkMissingIterableValueType: true
+    checkGenericClassInNonGenericObjectType: true
+
+    # Stricter checks
+    reportUnmatchedIgnoredErrors: true
+    treatPhpDocTypesAsCertain: false
+
+    # Error handling
+    ignoreErrors:
+        # Allow dynamic callable
+        - '#Parameter \#1 \$callback of method .+ expects callable.+#'
+        # Allow mixed in some contexts
+        - '#Method .+ should return .+ but returns mixed.#'
+
+    # Extensions
+    stubFiles:
+        - stubs/Redis.stub
