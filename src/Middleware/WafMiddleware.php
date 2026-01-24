@@ -81,17 +81,17 @@ class WafMiddleware
     /**
      * Security configuration
      */
-    private SecurityConfig $config;
+    protected SecurityConfig $config;
 
     /**
      * Storage backend for IP scores, bans, and caching
      */
-    private StorageInterface $storage;
+    protected StorageInterface $storage;
 
     /**
      * Logger for security events
      */
-    private LoggerInterface $logger;
+    protected LoggerInterface $logger;
 
     /**
      * Bot verifier instance (DNS + IP verification)
@@ -567,7 +567,7 @@ class WafMiddleware
      * @param string $ip Client IP address
      * @return bool True if whitelisted
      */
-    private function isIPWhitelisted(string $ip): bool
+    protected function isIPWhitelisted(string $ip): bool
     {
         $whitelist = $this->config->getIPWhitelist();
 
@@ -596,7 +596,7 @@ class WafMiddleware
      * @param string $ip Client IP address
      * @return bool True if blacklisted
      */
-    private function isIPBlacklisted(string $ip): bool
+    protected function isIPBlacklisted(string $ip): bool
     {
         $blacklist = $this->config->getIPBlacklist();
 
@@ -628,7 +628,7 @@ class WafMiddleware
      * @param string $cidr CIDR notation (e.g., '192.168.1.0/24' or '2001:db8::/32')
      * @return bool True if IP is in range
      */
-    private function ipInCIDR(string $ip, string $cidr): bool
+    protected function ipInCIDR(string $ip, string $cidr): bool
     {
         // Parse CIDR notation
         if (!str_contains($cidr, '/')) {

@@ -237,15 +237,31 @@ class SecurityConfig
     /**
      * Add IP to whitelist (never ban)
      *
-     * @param string|array<int, string> $ips Single IP or array of IPs
+     * Supports both single IPs and CIDR ranges:
+     * - Single IP: '192.168.1.1'
+     * - CIDR range: '192.168.1.0/24', '10.0.0.0/8'
+     *
+     * @param string|array<int, string> $ips Single IP/CIDR or array of IPs/CIDRs
      * @return self
      */
     public function addIPWhitelist(string|array $ips): self
     {
         $ips = is_array($ips) ? $ips : [$ips];
         foreach ($ips as $ip) {
-            if (!filter_var($ip, FILTER_VALIDATE_IP)) {
-                throw new \InvalidArgumentException("Invalid IP address: {$ip}");
+            // Check if CIDR notation
+            if (strpos($ip, '/') !== false) {
+                [$ipPart, $mask] = explode('/', $ip);
+                if (filter_var($ipPart, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+                    throw new \InvalidArgumentException("Invalid CIDR notation: {$ip}");
+                }
+                if (!is_numeric($mask) || (int)$mask < 0 || (int)$mask > 32) {
+                    throw new \InvalidArgumentException("Invalid CIDR mask: {$ip}");
+                }
+            } else {
+                // Single IP
+                if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+                    throw new \InvalidArgumentException("Invalid IP address: {$ip}");
+                }
             }
             $this->ipWhitelist[] = $ip;
         }
@@ -255,15 +271,31 @@ class SecurityConfig
     /**
      * Add IP to blacklist (always ban)
      *
-     * @param string|array<int, string> $ips Single IP or array of IPs
+     * Supports both single IPs and CIDR ranges:
+     * - Single IP: '192.168.1.1'
+     * - CIDR range: '192.168.1.0/24', '10.0.0.0/8'
+     *
+     * @param string|array<int, string> $ips Single IP/CIDR or array of IPs/CIDRs
      * @return self
      */
     public function addIPBlacklist(string|array $ips): self
     {
         $ips = is_array($ips) ? $ips : [$ips];
         foreach ($ips as $ip) {
-            if (!filter_var($ip, FILTER_VALIDATE_IP)) {
-                throw new \InvalidArgumentException("Invalid IP address: {$ip}");
+            // Check if CIDR notation
+            if (strpos($ip, '/') !== false) {
+                [$ipPart, $mask] = explode('/', $ip);
+                if (filter_var($ipPart, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+                    throw new \InvalidArgumentException("Invalid CIDR notation: {$ip}");
+                }
+                if (!is_numeric($mask) || (int)$mask < 0 || (int)$mask > 32) {
+                    throw new \InvalidArgumentException("Invalid CIDR mask: {$ip}");
+                }
+            } else {
+                // Single IP
+                if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+                    throw new \InvalidArgumentException("Invalid IP address: {$ip}");
+                }
             }
             $this->ipBlacklist[] = $ip;
         }

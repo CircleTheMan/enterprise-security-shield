@@ -397,6 +397,100 @@ $config->enableIntelligence(true)                 // Gather attack intelligence
 $config->setEnvironment('production');            // production, staging, development
 ```
 
+### WooCommerce Integration
+
+Specialized security layer for WooCommerce e-commerce sites.
+
+```php
+<?php
+
+use Senza1dio\SecurityShield\Integrations\WooCommerce\WooCommerceSecurityMiddleware;
+use Senza1dio\SecurityShield\Storage\RedisStorage;
+use Senza1dio\SecurityShield\Config\SecurityConfig;
+
+// 1. Connect Redis
+$redis = new Redis();
+$redis->connect('127.0.0.1', 6379);
+
+// 2. Create storage
+$storage = new RedisStorage($redis, 'woocommerce_security:');
+
+// 3. Configure security
+$config = new SecurityConfig();
+$config->setAutoBlockThreshold(50)
+       ->setBanDuration(3600)
+
+       // CRITICAL: Whitelist your own IP to prevent self-ban!
+       ->addWhitelist('YOUR_OFFICE_IP')      // Your IP address
+       ->addWhitelist('192.0.2.0/24');       // Payment gateway IP range
+
+// 4. Create WooCommerce security middleware
+$wooSecurity = new WooCommerceSecurityMiddleware($storage, $config);
+
+// 5. Protect your site
+if (!$wooSecurity->handle($_SERVER)) {
+    http_response_code(403);
+    header('Content-Type: application/json');
+    echo json_encode([
+        'error' => 'Access Denied',
+        'message' => 'Your request has been blocked for security reasons.',
+    ]);
+    exit;
+}
+```
+
+**What it protects:**
+- ✅ Admin AJAX endpoint abuse (`/wp-admin/admin-ajax.php`)
+- ✅ WooCommerce REST API brute force (`/wp-json/wc/v3/`)
+- ✅ Payment gateway callback spoofing (`/wc-api/`)
+- ✅ Cart manipulation attacks
+- ✅ Coupon brute force (automated coupon guessing)
+- ✅ Account enumeration (`/?author=`, `/wp-json/wp/v2/users`)
+- ✅ Checkout spam (fake order submissions)
+
+**What it does NOT protect:**
+- ❌ Business logic exploits (requires custom validation)
+- ❌ Payment gateway signature validation (use gateway SDK)
+- ❌ Cart price tampering (requires server-side validation)
+
+**WordPress mu-plugin integration** (recommended):
+
+Create `wp-content/mu-plugins/woocommerce-security.php`:
+
+```php
+<?php
+// WooCommerce Security Shield
+
+require_once ABSPATH . 'vendor/autoload.php';
+
+use Senza1dio\SecurityShield\Integrations\WooCommerce\WooCommerceSecurityMiddleware;
+use Senza1dio\SecurityShield\Storage\RedisStorage;
+use Senza1dio\SecurityShield\Config\SecurityConfig;
+
+add_action('init', function() {
+    // Setup Redis
+    $redis = new Redis();
+    $redis->connect('127.0.0.1', 6379);
+    $storage = new RedisStorage($redis, 'woocommerce_security:');
+
+    // Configure (whitelist your IP!)
+    $config = new SecurityConfig();
+    $config->setAutoBlockThreshold(50)
+           ->setBanDuration(3600)
+           ->addWhitelist('YOUR_OFFICE_IP');  // CRITICAL: Add your IP!
+
+    // Create middleware
+    $wooSecurity = new WooCommerceSecurityMiddleware($storage, $config);
+
+    // Check request
+    if (!$wooSecurity->handle($_SERVER)) {
+        wp_die('Access Denied', 'Security', ['response' => 403]);
+    }
+}, 1); // Priority 1 = runs very early
+```
+
+See `examples/07-woocommerce-integration.php` for complete example.
+
 ### Array Configuration (Laravel/Symfony)
 
 ```php
