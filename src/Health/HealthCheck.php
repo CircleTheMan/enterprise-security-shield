@@ -112,7 +112,7 @@ class HealthCheck
     public function check(bool $forceRefresh = false): HealthResult
     {
         // Check cache
-        if (!$forceRefresh && $this->isCacheValid()) {
+        if (!$forceRefresh && $this->isCacheValid() && $this->cachedResult !== null) {
             return $this->cachedResult;
         }
 

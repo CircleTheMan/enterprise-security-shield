@@ -9,6 +9,9 @@ namespace Senza1dio\SecurityShield\Health;
  */
 final class ComponentHealth
 {
+    /**
+     * @param array<string, mixed> $metadata
+     */
     public function __construct(
         public readonly string $name,
         public readonly HealthStatus $status,

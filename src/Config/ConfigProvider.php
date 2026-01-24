@@ -240,7 +240,7 @@ class ConfigProvider
         $oldValue = $this->get($key);
 
         $serialized = is_scalar($value) ? (string) $value : json_encode($value);
-        $this->storage->set($this->keyPrefix . $key, $serialized, $ttl);
+        $this->storage->set($this->keyPrefix . $key, $serialized !== false ? $serialized : '', $ttl ?? 3600);
 
         // Invalidate cache
         unset($this->cache[$key]);
@@ -448,7 +448,8 @@ class ConfigProvider
 
     private function getFromRemote(string $key): mixed
     {
-        if ($this->storage === null) {
+        $storage = $this->storage;
+        if ($storage === null) {
             return null;
         }
 
@@ -463,7 +464,7 @@ class ConfigProvider
         }
 
         // Fallback: try to fetch individual key from storage
-        $value = $this->storage->get($this->keyPrefix . $key);
+        $value = $storage->get($this->keyPrefix . $key);
 
         if ($value === null) {
             return null;

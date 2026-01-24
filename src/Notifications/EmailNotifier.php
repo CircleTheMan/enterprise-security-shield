@@ -185,8 +185,9 @@ class EmailNotifier implements NotifierInterface
 
             foreach ($context as $key => $value) {
                 $formattedKey = htmlspecialchars(ucfirst(str_replace('_', ' ', $key)));
+                $jsonEncoded = json_encode($value, JSON_PRETTY_PRINT);
                 $formattedValue = is_array($value)
-                    ? '<pre style="margin:0;background:#f5f5f5;padding:5px;">' . htmlspecialchars(json_encode($value, JSON_PRETTY_PRINT)) . '</pre>'
+                    ? '<pre style="margin:0;background:#f5f5f5;padding:5px;">' . htmlspecialchars($jsonEncoded !== false ? $jsonEncoded : '{}') . '</pre>'
                     : htmlspecialchars((string) $value);
 
                 $contextHtml .= <<<HTML
@@ -297,6 +298,12 @@ class EmailNotifier implements NotifierInterface
         try {
             $host = $this->smtpHost;
             $port = $this->smtpPort ?? 587;
+
+            if ($host === null) {
+                error_log('EmailNotifier: SMTP host not configured');
+
+                return false;
+            }
 
             // Validate encryption setting
             if (!in_array($this->smtpEncryption, ['tls', 'ssl', 'none', null], true)) {

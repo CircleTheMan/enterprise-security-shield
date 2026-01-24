@@ -33,6 +33,7 @@ class ConfigValidator
 
     private mixed $max = null;
 
+    /** @var array<mixed>|null */
     private ?array $allowedValues = null;
 
     private ?string $pattern = null;
@@ -126,7 +127,7 @@ class ConfigValidator
     /**
      * Set custom validator function.
      *
-     * @param callable(mixed): bool|string $validator Returns true or error message
+     * @param callable(mixed): (bool|string) $validator Returns true or error message
      */
     public function custom(callable $validator): self
     {
