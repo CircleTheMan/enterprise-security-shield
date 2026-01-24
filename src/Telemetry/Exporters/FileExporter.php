@@ -119,11 +119,8 @@ class FileExporter implements SpanExporterInterface
     private function getHandle()
     {
         if ($this->handle === null) {
-            $this->handle = fopen($this->filePath, 'a');
-
-            if ($this->handle === false) {
-                $this->handle = null;
-            }
+            $opened = fopen($this->filePath, 'a');
+            $this->handle = $opened !== false ? $opened : null;
         }
 
         return $this->handle;

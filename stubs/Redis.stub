@@ -16,6 +16,8 @@ class Redis
     public function get(string $key) {}
 
     /**
+     * @param array<string, mixed>|int|null $options
+     *
      * @return bool
      */
     public function set(string $key, string $value, array|int|null $options = null) {}
@@ -26,7 +28,7 @@ class Redis
     public function del(string ...$keys) {}
 
     /**
-     * @return bool
+     * @return int|bool
      */
     public function exists(string ...$keys) {}
 

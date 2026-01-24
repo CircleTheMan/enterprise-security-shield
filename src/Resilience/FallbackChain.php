@@ -102,11 +102,9 @@ class FallbackChain
     /**
      * Execute the fallback chain.
      *
-     * @template T
-     *
      * @throws AllProvidersFailedException When all providers fail and no default provided
      *
-     * @return T|null Result from first successful provider, or null if all failed
+     * @return mixed Result from first successful provider, or null if all failed
      */
     public function execute(): mixed
     {

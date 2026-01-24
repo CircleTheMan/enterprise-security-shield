@@ -46,7 +46,7 @@ class Tracer
     /** @var array<int, SpanInterface> */
     private array $activeSpans = [];
 
-    /** @var array<int, Span> */
+    /** @var array<int, SpanInterface> */
     private array $finishedSpans = [];
 
     /** @var array<int, SpanInterface> */
@@ -156,7 +156,7 @@ class Tracer
         if ($traceId === null && $this->sampler !== null) {
             if (!$this->sampler->shouldSample($name, $kind, $attributes)) {
                 // Return a no-op span that doesn't record
-                $noOp = new NoOpSpan($name);
+                $noOp = new NoOpSpan();
                 $this->activeSpansAll[] = $noOp;
 
                 return $noOp;
@@ -352,8 +352,8 @@ class Tracer
             return count($spans);
         }
 
-        // Export in batches
-        $batches = array_chunk($spans, $this->batchSize);
+        // Export in batches (ensure batch size is at least 1)
+        $batches = array_chunk($spans, max(1, $this->batchSize));
         $exported = 0;
 
         foreach ($batches as $batch) {
@@ -392,10 +392,12 @@ class Tracer
      */
     public function shutdown(): void
     {
-        // End any remaining active spans
+        // End any remaining active spans (only add Span instances to finishedSpans)
         foreach ($this->activeSpans as $span) {
             $span->end();
-            $this->finishedSpans[] = $span;
+            if ($span instanceof Span) {
+                $this->finishedSpans[] = $span;
+            }
         }
 
         $this->activeSpans = [];

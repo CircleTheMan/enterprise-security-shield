@@ -991,4 +991,72 @@ class DatabaseStorage implements StorageInterface
 
         return false;
     }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function delete(string $key): bool
+    {
+        if ($this->redis) {
+            try {
+                $result = $this->redis->del($this->keyPrefix . $key);
+
+                return $result !== false;
+            } catch (\RedisException $e) {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function exists(string $key): bool
+    {
+        if ($this->redis) {
+            try {
+                $result = $this->redis->exists($this->keyPrefix . $key);
+
+                return is_int($result) ? $result > 0 : (bool) $result;
+            } catch (\RedisException $e) {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function increment(string $key, int $delta, int $ttl): int
+    {
+        if ($this->redis) {
+            try {
+                $fullKey = $this->keyPrefix . $key;
+
+                // Use Lua script for atomic increment with TTL
+                $lua = <<<'LUA'
+                    local key = KEYS[1]
+                    local delta = tonumber(ARGV[1])
+                    local ttl = tonumber(ARGV[2])
+                    local newValue = redis.call('INCRBY', key, delta)
+                    if redis.call('TTL', key) < 0 then
+                        redis.call('EXPIRE', key, ttl)
+                    end
+                    return newValue
+                    LUA;
+
+                $result = $this->redis->eval($lua, [$fullKey, $delta, $ttl], 1);
+
+                return is_int($result) ? $result : 0;
+            } catch (\RedisException $e) {
+                return 0;
+            }
+        }
+
+        return 0;
+    }
 }

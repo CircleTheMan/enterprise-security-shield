@@ -314,7 +314,12 @@ class TelegramNotifier implements NotifierInterface
 
         foreach ($context as $key => $value) {
             $formattedKey = ucfirst(str_replace('_', ' ', $key));
-            $formattedValue = is_array($value) ? json_encode($value) : (string) $value;
+            if (is_array($value)) {
+                $encoded = json_encode($value);
+                $formattedValue = $encoded !== false ? $encoded : '[]';
+            } else {
+                $formattedValue = (string) $value;
+            }
             $lines[] = "<b>{$this->escapeHtml($formattedKey)}:</b> <code>{$this->escapeHtml($formattedValue)}</code>";
         }
 

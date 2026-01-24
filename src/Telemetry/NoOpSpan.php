@@ -16,7 +16,7 @@ class NoOpSpan implements SpanInterface
 
     private string $traceId;
 
-    public function __construct(string $name)
+    public function __construct()
     {
         $this->spanId = str_repeat('0', 16);
         $this->traceId = str_repeat('0', 32);

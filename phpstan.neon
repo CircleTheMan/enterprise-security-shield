@@ -13,15 +13,8 @@ parameters:
     checkGenericClassInNonGenericObjectType: true
 
     # Stricter checks
-    reportUnmatchedIgnoredErrors: true
+    reportUnmatchedIgnoredErrors: false
     treatPhpDocTypesAsCertain: false
-
-    # Error handling
-    ignoreErrors:
-        # Allow dynamic callable
-        - '#Parameter \#1 \$callback of method .+ expects callable.+#'
-        # Allow mixed in some contexts
-        - '#Method .+ should return .+ but returns mixed.#'
 
     # Extensions
     stubFiles:

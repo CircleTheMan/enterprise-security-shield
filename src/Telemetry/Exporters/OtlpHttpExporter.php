@@ -31,27 +31,19 @@ class OtlpHttpExporter implements SpanExporterInterface
 
     private bool $compression;
 
-    /** @var array<int, array<string, mixed>> */
-    private array $buffer = [];
-
-    private int $maxBatchSize;
-
     /**
      * @param string $endpoint OTLP collector endpoint
      * @param int $timeoutMs Request timeout in milliseconds
      * @param bool $compression Enable gzip compression
-     * @param int $maxBatchSize Max spans per batch
      */
     public function __construct(
         string $endpoint,
         int $timeoutMs = 10000,
         bool $compression = true,
-        int $maxBatchSize = 512,
     ) {
         $this->endpoint = rtrim($endpoint, '/');
         $this->timeoutMs = $timeoutMs;
         $this->compression = $compression;
-        $this->maxBatchSize = $maxBatchSize;
 
         $this->headers = [
             'Content-Type' => 'application/json',
@@ -114,7 +106,9 @@ class OtlpHttpExporter implements SpanExporterInterface
         }
 
         // Check response status
-        $statusCode = $this->getResponseStatusCode($http_response_header ?? []);
+        /** @var array<int, string> $responseHeaders */
+        $responseHeaders = $http_response_header;
+        $statusCode = $this->getResponseStatusCode($responseHeaders);
 
         return $statusCode >= 200 && $statusCode < 300;
     }
