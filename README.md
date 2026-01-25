@@ -67,18 +67,60 @@ composer require senza1dio/security-shield
 
 ## Quick Start
 
+### Option 1: No Dependencies (Development/Testing)
+
 ```php
 <?php
 use Senza1dio\SecurityShield\Middleware\SecurityMiddleware;
 use Senza1dio\SecurityShield\Config\SecurityConfig;
+use Senza1dio\SecurityShield\Storage\NullStorage;
+
+// In-memory storage - NO Redis/Database required
+$config = (new SecurityConfig())
+    ->setStorage(new NullStorage());
+
+$security = new SecurityMiddleware($config);
+
+if (!$security->handle($_SERVER)) {
+    http_response_code(403);
+    exit('Access Denied');
+}
+```
+
+**Note**: NullStorage loses data between requests. Use for testing only.
+
+### Option 2: Database Storage (Production without Redis)
+
+```php
+<?php
+use Senza1dio\SecurityShield\Storage\DatabaseStorage;
+
+// Use your existing database - NO Redis required
+$pdo = new PDO('mysql:host=localhost;dbname=app', 'user', 'pass');
+
+$config = (new SecurityConfig())
+    ->setStorage(new DatabaseStorage($pdo));
+
+$security = new SecurityMiddleware($config);
+
+if (!$security->handle($_SERVER)) {
+    http_response_code(403);
+    exit('Access Denied');
+}
+```
+
+### Option 3: Redis Storage (Recommended for Production)
+
+```php
+<?php
 use Senza1dio\SecurityShield\Storage\RedisStorage;
 
-// Redis required for distributed state
+// Fastest option - requires ext-redis
 $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 
-$storage = new RedisStorage($redis);
-$config = (new SecurityConfig())->setStorage($storage);
+$config = (new SecurityConfig())
+    ->setStorage(new RedisStorage($redis));
 
 $security = new SecurityMiddleware($config);
 
@@ -262,11 +304,45 @@ if (!$result->valid) {
 
 ## Storage Backends
 
-| Backend | Use Case | Pros | Cons |
-|---------|----------|------|------|
-| RedisStorage | Production | Fast, distributed state | Requires Redis server |
-| DatabaseStorage | Existing DB | No extra infra | Slower, more complex |
-| NullStorage | Testing | No dependencies | Data lost per request |
+**Choose the right storage for your use case:**
+
+| Backend | Use Case | Dependencies | Performance | Persistence |
+|---------|----------|--------------|-------------|-------------|
+| **NullStorage** | Testing, Development | ✅ None | ~0.001ms | ❌ No (in-memory) |
+| **DatabaseStorage** | Production (no Redis) | `ext-pdo` | ~1-5ms | ✅ Yes (MySQL/PostgreSQL) |
+| **RedisStorage** | Production (recommended) | `ext-redis` | ~0.05ms | ✅ Yes (distributed) |
+
+### When to Use Each Backend
+
+**NullStorage** - Development/Testing Only
+```php
+$config = (new SecurityConfig())->setStorage(new NullStorage());
+```
+- ✅ Zero setup, no dependencies
+- ✅ Perfect for unit tests
+- ❌ Data lost between requests
+- ❌ NOT for production
+
+**DatabaseStorage** - Production without Redis
+```php
+$pdo = new PDO('mysql:host=localhost;dbname=app', 'user', 'pass');
+$config = (new SecurityConfig())->setStorage(new DatabaseStorage($pdo));
+```
+- ✅ No extra infrastructure needed
+- ✅ Uses existing database
+- ✅ Persistent across servers
+- ⚠️ Slower than Redis (1-5ms vs 0.05ms)
+
+**RedisStorage** - Production (Best Performance)
+```php
+$redis = new Redis();
+$redis->connect('127.0.0.1', 6379);
+$config = (new SecurityConfig())->setStorage(new RedisStorage($redis));
+```
+- ✅ Ultra-fast (~0.05ms)
+- ✅ Distributed state across servers
+- ✅ Built-in TTL expiration
+- ⚠️ Requires Redis server
 
 ---
 
